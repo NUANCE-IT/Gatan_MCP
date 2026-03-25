@@ -1,6 +1,6 @@
 # Tools Reference
 
-All 12 GMS-MCP tools, their Pydantic-validated parameters, and JSON response schemas.
+All 21 GMS-MCP tools, their Pydantic-validated parameters, and JSON response schemas.
 
 ---
 
@@ -29,6 +29,19 @@ Read the current state of all microscope subsystems. **Always call this first.**
   "camera": { "name": "OneView", "inserted": true, "temp_c": -24.8, "n_signals": 4 }
 }
 ```
+
+---
+
+## `gms_get_front_image`
+
+Inspect the front-most image in the GMS workspace.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `include_data` | bool | false | Include base64-encoded pixel data |
+| `include_tags` | bool | true | Include serialisable image tags when available |
+
+**Returns:** image shape, dtype, statistics, calibration, metadata, and optional tags/data.
 
 ---
 
@@ -106,6 +119,129 @@ Acquire an electron diffraction pattern and extract d-spacings.
 | `binning` | int | {1,2,4,8} | 1 |
 
 **Returns:** pattern shape, camera length, pixel scale (1/Å per pixel), ring radii (px), d-spacings (Å).
+
+---
+
+## `gms_apply_image_filter`
+
+Apply median and/or Gaussian filtering to the front-most image or ROI.
+
+| Parameter | Type | Range | Default | Description |
+|---|---|---|---|---|
+| `roi` | list[int] or null | len=4 | null | Optional [top, left, bottom, right] ROI |
+| `median_size` | int | [0, 21] | 0 | Median kernel size; 0 disables median filtering |
+| `gaussian_sigma` | float | [0, 20] | 0.0 | Gaussian sigma in pixels; 0 disables blur |
+| `output_name` | str | — | `Filtered_Image` | Output image name |
+| `show_result` | bool | — | true | Display the derived image in GMS |
+
+**Returns:** processing parameters plus the derived image summary.
+
+---
+
+## `gms_compute_radial_profile`
+
+Compute a 1D radial profile from a diffraction pattern or from the FFT of a TEM image.
+
+| Parameter | Type | Range | Default | Description |
+|---|---|---|---|---|
+| `mode` | str | `fft` or `diffraction` | `fft` | Profile source |
+| `roi` | list[int] or null | len=4 | null | Optional [top, left, bottom, right] ROI |
+| `binning` | int | [1, 16] | 1 | Integer binning before profiling |
+| `mask_center_lines` | bool | — | true | Mask central horizontal and vertical lines |
+| `mask_percent` | float | [0, 50] | 5.0 | Ignore the innermost percentage of radius |
+| `profile_metric` | str | `radial_max_minus_mean`, `radial_mean`, `radial_max` | `radial_max_minus_mean` | Profile statistic |
+| `smooth_sigma` | float | [0, 10] | 1.0 | Gaussian smoothing of the 1D profile |
+
+**Returns:** profile values, detected peak positions, and analysis metadata.
+
+---
+
+## `gms_compute_max_fft`
+
+Compute the maximum FFT over a grid of local image windows.
+
+| Parameter | Type | Range | Default | Description |
+|---|---|---|---|---|
+| `roi` | list[int] or null | len=4 | null | Optional [top, left, bottom, right] ROI |
+| `fft_size` | int | [32, 1024] | 256 | FFT window size in pixels |
+| `spacing` | int | [1, 1024] | 256 | Stride between neighbouring windows |
+| `log_scale` | bool | — | true | Log-scale FFT magnitude |
+| `output_name` | str | — | `FFT_Max` | Output image name |
+| `show_result` | bool | — | true | Display the derived image in GMS |
+
+**Returns:** FFT-analysis parameters and the derived reciprocal-space image summary.
+
+---
+
+## `gms_start_live_processing_job`
+
+Start a persistent live-processing job for radial profiles, live difference imaging, live FFT maps, live filtered views, or live maximum-spot mapping from 4D-STEM datasets.
+
+| Parameter | Type | Range | Default | Description |
+|---|---|---|---|---|
+| `job_type` | str | `radial_profile`, `difference`, `fft_map`, `filtered_view`, `maximum_spot_mapping` | — | Live job type |
+| `poll_interval_s` | float | [0.05, 60] | 0.5 | Polling interval between updates |
+| `roi` | list[int] or null | len=4 | null | Optional source ROI |
+| `show_result` | bool | — | false | Create/update a derived DM image while the job runs |
+| `output_name` | str or null | — | null | Optional result image name |
+| `history_length` | int | [8, 2000] | 200 | Rolling history columns for radial-profile jobs |
+| `profile_mode` | str | `fft` or `diffraction` | `fft` | Radial-profile source mode |
+| `binning` | int | [1, 16] | 1 | Radial-profile binning |
+| `mask_center_lines` | bool | — | true | Radial-profile center-line masking |
+| `mask_percent` | float | [0, 50] | 5.0 | Radial-profile inner-radius masking |
+| `profile_metric` | str | `radial_max_minus_mean`, `radial_mean`, `radial_max` | `radial_max_minus_mean` | Radial-profile metric |
+| `smooth_sigma` | float | [0, 10] | 1.0 | Radial-profile smoothing |
+| `avg_period_1` | int | [1, 1000] | 5 | Difference-job short moving-average period |
+| `avg_period_2` | int | [1, 1000] | 10 | Difference-job long moving-average period |
+| `gaussian_sigma` | float | [0, 20] | 0.0 | Difference-job or filtered-view Gaussian sigma |
+| `median_size` | int | [0, 21] | 0 | Filtered-view median kernel size |
+| `fft_size` | int | [32, 1024] | 256 | FFT-map local FFT size |
+| `spacing` | int | [1, 1024] | 256 | FFT-map window stride |
+| `log_scale` | bool | — | true | FFT-map log-scaling |
+| `mask_center_radius_px` | float | [0, 512] | 5.0 | Maximum-spot-mapping central-beam mask radius |
+| `map_var` | str | `theta` or `radius` | `theta` | Maximum-spot-mapping color variable |
+| `subtract_mean_background` | bool | — | false | Maximum-spot-mapping mean-pattern subtraction |
+
+**Returns:** job ID, backend (`local` or `bridge`), starting state, source image name, and polling interval.
+
+---
+
+## `gms_get_live_processing_job_status`
+
+Poll a live-processing job for status and summary.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `job_id` | str | — | Live-processing job identifier |
+| `include_data` | bool | false | Reserved for result queries; ignored by status |
+
+**Returns:** job state, backend, iteration count, timestamps, last error, and latest result summary.
+
+---
+
+## `gms_get_live_processing_job_result`
+
+Fetch the latest derived result from a live-processing job.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `job_id` | str | — | Live-processing job identifier |
+| `include_data` | bool | false | Include base64-encoded result data |
+
+**Returns:** latest result metadata plus optional raw data.
+
+---
+
+## `gms_stop_live_processing_job`
+
+Stop a live-processing job.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `job_id` | str | — | Live-processing job identifier |
+| `include_data` | bool | false | Ignored for stop requests |
+
+**Returns:** final job status after shutdown.
 
 ---
 
@@ -191,3 +327,20 @@ Virtual detector / DPC / CoM analysis on a loaded 4D-STEM dataset.
 Valid `analysis_type` values: `virtual_bf`, `virtual_haadf`, `com`, `dpc`, `strain`.
 
 **Returns:** result shape, min/max/mean/std of the computed map.
+
+---
+
+## `gms_run_4dstem_maximum_spot_mapping`
+
+Produce a color maximum-spot map from the currently loaded 4D-STEM dataset.
+
+| Parameter | Type | Range | Default | Description |
+|---|---|---|---|---|
+| `mask_center_radius_px` | float | [0, 512] | 5.0 | Radius around the central beam to ignore |
+| `map_var` | str | `theta` or `radius` | `theta` | Variable encoded into the colormap |
+| `subtract_mean_background` | bool | — | false | Subtract mean diffraction pattern first |
+| `gaussian_sigma` | float | [0, 10] | 0.0 | Optional blur applied to diffraction patterns |
+| `output_name` | str | — | `4DSTEM_Maximum_Spot_Map` | Output image name |
+| `show_result` | bool | — | true | Display the derived image in GMS |
+
+**Returns:** RGB map summary plus theta/radius/intensity ranges for the selected 4D-STEM dataset.

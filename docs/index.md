@@ -13,7 +13,7 @@ dependencies.
 |---|---|
 | [Installation](installation.md) | Full setup guide for all deployment scenarios |
 | [Architecture](architecture.md) | Two-process bridge, ZeroMQ design, DMSimulator |
-| [Tools Reference](tools_reference.md) | Complete API reference for all 12 MCP tools |
+| [Tools Reference](tools_reference.md) | Complete API reference for all 21 MCP tools |
 | [DM API Reference](dm_api_reference.md) | DigitalMicrograph Python API quick reference |
 | [Live GMS Setup](gms_live_setup.md) | Step-by-step guide for connecting a real microscope |
 
@@ -41,7 +41,7 @@ gms-mcp/
 ├── pyproject.toml                # packaging, ruff, mypy, pytest config
 ├── src/gms_mcp/
 │   ├── __init__.py               # version
-│   ├── server.py                 # FastMCP server — 12 tools
+│   ├── server.py                 # FastMCP server — 21 tools
 │   ├── simulator.py              # DMSimulator physics twin
 │   ├── client.py                 # Ollama ReAct agent
 │   └── dm_plugin.py              # ZeroMQ bridge (runs inside GMS) <- new
@@ -60,7 +60,7 @@ gms-mcp/
 	├── index.md
 	├── installation.md
 	├── architecture.md           # ASCII diagram, data-flow walkthrough
-	├── tools_reference.md        # full API for all 12 tools
+	├── tools_reference.md        # full API for all 21 tools
 	├── dm_api_reference.md       # DM Python quick reference
 	└── gms_live_setup.md         # microscope PC wiring guide
 ```

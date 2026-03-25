@@ -21,12 +21,12 @@ GMS-MCP connects **Gatan Microscopy Suite (GMS) 3.60** to any MCP-compatible LLM
 | LLM backend | Local Ollama (air-gap compatible) |
 | Data handling | On-site, local-first workflow |
 | Modalities | TEM / HRTEM, STEM (HAADF/BF/ABF), 4D-STEM / NBED, EELS, diffraction |
-| Built-in analysis | Virtual BF/HAADF, CoM, DPC, ring detection and d-spacing estimation |
-| Automation | Stage control, beam/optics control, detector configuration, tilt series |
+| Built-in analysis | Virtual BF/HAADF, CoM, DPC, radial profiles, max-FFT, filtering, maximum-spot mapping |
+| Automation | Stage control, beam/optics control, detector configuration, tilt series, persistent live-processing jobs |
 | Validation | Pydantic v2 physical-bound checks on tool inputs |
 | Simulation | Physics-plausible DMSimulator for hardware-free development |
-| Testing | 55-test suite (49 hardware-independent + 6 Ollama integration) |
-| Transport | stdio + Streamable HTTP |
+| Testing | 67-test suite (61 hardware-independent + 6 Ollama integration) |
+| Transport | stdio + Streamable HTTP + optional ZeroMQ live-job bridge |
 | License | MIT |
 
 ---
@@ -116,6 +116,9 @@ python -m gms_mcp.server --transport http --port 8000
 GMS_MCP_ZMQ=tcp://microscope-pc:5555 python -m gms_mcp.client
 ```
 
+When `GMS_MCP_ZMQ` is set, persistent live-processing jobs are created and managed inside
+the DM bridge so long-running state stays aligned with the live GMS process.
+
 ---
 
 ## Available Tools
@@ -123,17 +126,26 @@ GMS_MCP_ZMQ=tcp://microscope-pc:5555 python -m gms_mcp.client
 | Tool | Domain | Description |
 |---|---|---|
 | `gms_get_microscope_state` | Diagnostics | Read all instrument parameters |
+| `gms_get_front_image` | Workspace | Inspect the current front-most DM image and tags |
 | `gms_acquire_tem_image` | Acquisition | TEM / HRTEM image with exposure, binning, ROI |
 | `gms_acquire_stem` | Acquisition | HAADF / BF / ABF STEM scan |
 | `gms_acquire_4d_stem` | Acquisition | Full 4D-STEM / NBED dataset |
 | `gms_acquire_eels` | Acquisition | EELS spectrum with GIF/IFC control |
 | `gms_acquire_diffraction` | Acquisition | Electron diffraction + auto d-spacing extraction |
+| `gms_apply_image_filter` | Analysis | Median / Gaussian filtering on the front image or ROI |
+| `gms_compute_radial_profile` | Analysis | 1D radial profile from diffraction or HRTEM FFT |
+| `gms_compute_max_fft` | Analysis | Max-FFT map over local windows in the front image |
+| `gms_start_live_processing_job` | Workflow | Start a persistent live radial-profile, difference, FFT-map, filtered-view, or maximum-spot-mapping job |
+| `gms_get_live_processing_job_status` | Workflow | Poll a live job for iterations, status, and latest summary |
+| `gms_get_live_processing_job_result` | Workflow | Retrieve the latest derived result from a live job |
+| `gms_stop_live_processing_job` | Workflow | Stop a live-processing job |
 | `gms_get_stage_position` | Stage | Read X, Y, Z, α, β |
 | `gms_set_stage_position` | Stage | Move stage (validated bounds) |
 | `gms_set_beam_parameters` | Optics | Spot size, focus, beam shift/tilt, stigmators |
 | `gms_configure_detectors` | Detectors | Insert/retract camera, CCD temp, HAADF/BF/ABF |
 | `gms_acquire_tilt_series` | Workflow | Automated tomographic tilt series |
 | `gms_run_4dstem_analysis` | Analysis | Virtual BF/HAADF, CoM, DPC maps |
+| `gms_run_4dstem_maximum_spot_mapping` | Analysis | Color maximum-spot map from a 4D-STEM dataset |
 
 All tools enforce **physical parameter bounds** via Pydantic v2 before any hardware command is issued.
 
@@ -200,7 +212,7 @@ pytest tests/ -m "not ollama" --cov=gms_mcp --cov-report=html
 | Class | Tests | Hardware required |
 |---|---|---|
 | `TestDMSimulator` | 17 | None |
-| `TestMCPServerTools` | 28 | None |
+| `TestMCPServerTools` | 39 | None |
 | `TestServerTransport` | 4 | None |
 | `TestOllamaIntegration` | 6 | Ollama + model |
 
@@ -219,14 +231,14 @@ gms-mcp/
 ├── pyproject.toml                # packaging, ruff, mypy, pytest config
 ├── src/gms_mcp/
 │   ├── __init__.py               # version
-│   ├── server.py                 # FastMCP server — 12 tools
+│   ├── server.py                 # FastMCP server — 21 tools
 │   ├── simulator.py              # DMSimulator physics twin
 │   ├── client.py                 # Ollama ReAct agent
-│   └── dm_plugin.py              # ZeroMQ bridge (runs inside GMS) ← new
+│   └── dm_plugin.py              # ZeroMQ bridge with persistent live-job backend
 ├── tests/
 │   ├── __init__.py
 │   ├── conftest.py               # session fixtures, GMS_SIMULATE=1
-│   └── test_gms_mcp.py          # 55 tests (49 hardware-free)
+│   └── test_gms_mcp.py           # 67 tests (61 hardware-free)
 ├── examples/
 │   ├── 01_basic_query.py
 │   ├── 02_tem_acquisition.py
@@ -238,7 +250,7 @@ gms-mcp/
 │   ├── index.md
 │   ├── installation.md
 │   ├── architecture.md           # ASCII diagram, data-flow walkthrough
-│   ├── tools_reference.md        # full API for all 12 tools
+│   ├── tools_reference.md        # full API for all 21 tools
 │   ├── dm_api_reference.md       # DM Python quick reference
 │   └── gms_live_setup.md         # microscope PC wiring guide
 ```

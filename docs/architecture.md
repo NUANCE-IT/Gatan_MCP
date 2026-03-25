@@ -20,7 +20,7 @@ Everything else flows from this fact.
 │  │           FastMCP Server  (gms_mcp/server.py)           │    │
 │  │   transport: stdio  ──OR──  Streamable HTTP :8000/mcp   │    │
 │  │                                                         │    │
-│  │   12 tools with Pydantic v2 validation                  │    │
+│  │   21 tools with Pydantic v2 validation                  │    │
 │  │   ┌──────────┐  ┌──────────┐  ┌──────────┐             │    │
 │  │   │Acquisition│  │  Stage   │  │ Analysis │  ...        │    │
 │  │   └──────────┘  └──────────┘  └──────────┘             │    │
@@ -54,18 +54,21 @@ Everything else flows from this fact.
 
 ### FastMCP Server (`server.py`)
 
-- Runs as a **standalone Python process** (Python 3.9–3.12)
-- Registers 12 tools via `@mcp.tool` decorator
+- Runs as a **standalone Python process** (Python 3.10–3.12)
+- Registers 21 tools via `@mcp.tool` decorator
 - Validates every tool input with a Pydantic v2 model **before** issuing
   any hardware command
-- Serializes commands as JSON and dispatches to the DM bridge via ZeroMQ
+- Uses direct `DigitalMicrograph` calls inside GMS, `DMSimulator` in simulation mode,
+  and an optional ZeroMQ bridge path for persistent live-processing jobs when `GMS_MCP_ZMQ` is set
 - Supports two transports:
   - **stdio** — launched as a subprocess by `MultiServerMCPClient`
     (Ollama/LangChain use case)
   - **Streamable HTTP** — listens on `0.0.0.0:8000/mcp`
     (Claude.ai remote connector use case)
-- In simulation mode (`GMS_SIMULATE=1` or no ZMQ target), calls
-  `DMSimulator` directly instead of ZeroMQ
+- In simulation mode (`GMS_SIMULATE=1` or `DigitalMicrograph` unavailable), calls
+  `DMSimulator` directly
+- When `GMS_MCP_ZMQ=tcp://host:5555` is configured, delegates live-job lifecycle requests
+  (`start/status/result/stop`) to the DM bridge so persistent processing remains inside the GMS host process
 
 ### DM Bridge Plugin (`dm_plugin.py`)
 
@@ -74,6 +77,7 @@ Everything else flows from this fact.
 - Polls with 500 ms timeout, calling `DM.DoEvents()` each cycle
   to keep the GMS UI responsive
 - Dispatches JSON commands to the corresponding `DM.*` API calls
+- Maintains its own persistent live-job registry for bridge-backed live analysis
 - Serialises results (including NumPy arrays as base64) back to JSON
 
 ### DMSimulator (`simulator.py`)

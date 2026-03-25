@@ -37,11 +37,15 @@ import base64
 import json
 import os
 import sys
-from typing import Annotated, Optional
+import threading
+import time
+import uuid
+from typing import Annotated, Any, Optional, cast
 
 import numpy as np
 from fastmcp import FastMCP
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from scipy.ndimage import gaussian_filter, median_filter
 
 # ---------------------------------------------------------------------------
 # DM import with automatic simulation fallback
@@ -64,6 +68,9 @@ if _SIMULATE:
         sys.path.insert(0, _HERE)
     from gms_mcp.simulator import DMSimulator
     DM = DMSimulator()
+
+_BRIDGE_ZMQ_ENDPOINT = os.environ.get("GMS_MCP_ZMQ", "").strip()
+_BRIDGE_ZMQ_TIMEOUT_MS = int(os.environ.get("GMS_MCP_ZMQ_TIMEOUT_MS", "5000"))
 
 # ---------------------------------------------------------------------------
 # FastMCP server
@@ -111,6 +118,304 @@ class AcquireTEMInput(BaseModel):
         if v is not None and len(v) != 4:
             raise ValueError("roi must have exactly 4 elements: [top, left, bottom, right]")
         return v
+
+
+class FrontImageInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    include_data: bool = Field(
+        default=False,
+        description="If true, include base64-encoded pixel data in the response.",
+    )
+    include_tags: bool = Field(
+        default=True,
+        description="If true, include serialisable image tags when available.",
+    )
+
+
+class ImageFilterInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    roi: Optional[list[int]] = Field(
+        default=None,
+        description="Optional [top, left, bottom, right] ROI in pixels.",
+    )
+    median_size: int = Field(
+        default=0,
+        ge=0,
+        le=21,
+        description="Median-filter kernel size in pixels. 0 disables median filtering.",
+    )
+    gaussian_sigma: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=20.0,
+        description="Gaussian blur sigma in pixels. 0 disables Gaussian filtering.",
+    )
+    output_name: str = Field(
+        default="Filtered_Image",
+        description="Name assigned to the derived image in GMS.",
+    )
+    show_result: bool = Field(
+        default=True,
+        description="If true, display the derived image in GMS.",
+    )
+
+    @field_validator("roi")
+    @classmethod
+    def validate_roi(cls, v: Optional[list[int]]) -> Optional[list[int]]:
+        if v is not None and len(v) != 4:
+            raise ValueError("roi must have exactly 4 elements: [top, left, bottom, right]")
+        return v
+
+
+class RadialProfileInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    mode: str = Field(
+        default="fft",
+        description="Profile source: 'fft' for HRTEM FFT or 'diffraction' for direct diffraction data.",
+    )
+    roi: Optional[list[int]] = Field(
+        default=None,
+        description="Optional [top, left, bottom, right] ROI in pixels.",
+    )
+    binning: int = Field(
+        default=1,
+        ge=1,
+        le=16,
+        description="Integer binning factor applied before profiling.",
+    )
+    mask_center_lines: bool = Field(
+        default=True,
+        description="If true, zero the central horizontal and vertical lines.",
+    )
+    mask_percent: float = Field(
+        default=5.0,
+        ge=0.0,
+        le=50.0,
+        description="Percentage of the innermost radius to ignore.",
+    )
+    profile_metric: str = Field(
+        default="radial_max_minus_mean",
+        description="Metric: 'radial_max_minus_mean', 'radial_mean', or 'radial_max'.",
+    )
+    smooth_sigma: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=10.0,
+        description="Optional Gaussian smoothing applied to the resulting 1D profile.",
+    )
+
+    @field_validator("roi")
+    @classmethod
+    def validate_roi(cls, v: Optional[list[int]]) -> Optional[list[int]]:
+        if v is not None and len(v) != 4:
+            raise ValueError("roi must have exactly 4 elements: [top, left, bottom, right]")
+        return v
+
+
+class MaxFFTInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    roi: Optional[list[int]] = Field(
+        default=None,
+        description="Optional [top, left, bottom, right] ROI in pixels.",
+    )
+    fft_size: int = Field(
+        default=256,
+        ge=32,
+        le=1024,
+        description="FFT window size in pixels.",
+    )
+    spacing: int = Field(
+        default=256,
+        ge=1,
+        le=1024,
+        description="Stride between neighbouring FFT windows in pixels.",
+    )
+    log_scale: bool = Field(
+        default=True,
+        description="If true, log-scale the FFT magnitude.",
+    )
+    output_name: str = Field(
+        default="FFT_Max",
+        description="Name assigned to the derived image in GMS.",
+    )
+    show_result: bool = Field(
+        default=True,
+        description="If true, display the derived image in GMS.",
+    )
+
+    @field_validator("roi")
+    @classmethod
+    def validate_roi(cls, v: Optional[list[int]]) -> Optional[list[int]]:
+        if v is not None and len(v) != 4:
+            raise ValueError("roi must have exactly 4 elements: [top, left, bottom, right]")
+        return v
+
+
+class MaxSpotMapInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    mask_center_radius_px: float = Field(
+        default=5.0,
+        ge=0.0,
+        le=512.0,
+        description="Radius around the central beam to ignore when finding the brightest spot.",
+    )
+    map_var: str = Field(
+        default="theta",
+        description="Colour-map variable: 'theta' or 'radius'.",
+    )
+    subtract_mean_background: bool = Field(
+        default=False,
+        description="If true, subtract the mean diffraction pattern before processing.",
+    )
+    gaussian_sigma: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=10.0,
+        description="Optional Gaussian blur sigma applied to the diffraction patterns.",
+    )
+    output_name: str = Field(
+        default="4DSTEM_Maximum_Spot_Map",
+        description="Name assigned to the derived RGB image in GMS.",
+    )
+    show_result: bool = Field(
+        default=True,
+        description="If true, display the derived image in GMS.",
+    )
+
+
+class StartLiveProcessingJobInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    job_type: str = Field(
+        description="Live job type: 'radial_profile', 'difference', 'fft_map', 'filtered_view', or 'maximum_spot_mapping'.",
+    )
+    poll_interval_s: float = Field(
+        default=0.5,
+        ge=0.05,
+        le=60.0,
+        description="Polling interval in seconds between live updates.",
+    )
+    roi: Optional[list[int]] = Field(
+        default=None,
+        description="Optional [top, left, bottom, right] ROI in pixels.",
+    )
+    show_result: bool = Field(
+        default=False,
+        description="If true, create and update a derived result image in GMS.",
+    )
+    output_name: Optional[str] = Field(
+        default=None,
+        description="Optional result image name. Defaults to a job-specific name.",
+    )
+    include_result_data: bool = Field(
+        default=False,
+        description="If true, job result queries may include base64-encoded pixel data.",
+    )
+    history_length: int = Field(
+        default=200,
+        ge=8,
+        le=2000,
+        description="Rolling history length for radial-profile jobs.",
+    )
+    profile_mode: str = Field(
+        default="fft",
+        description="For radial-profile jobs: 'fft' or 'diffraction'.",
+    )
+    binning: int = Field(
+        default=1,
+        ge=1,
+        le=16,
+        description="For radial-profile jobs: integer binning factor.",
+    )
+    mask_center_lines: bool = Field(
+        default=True,
+        description="For radial-profile jobs: mask central horizontal and vertical lines.",
+    )
+    mask_percent: float = Field(
+        default=5.0,
+        ge=0.0,
+        le=50.0,
+        description="For radial-profile jobs: ignore the innermost percentage of radius.",
+    )
+    profile_metric: str = Field(
+        default="radial_max_minus_mean",
+        description="For radial-profile jobs: 'radial_max_minus_mean', 'radial_mean', or 'radial_max'.",
+    )
+    smooth_sigma: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=10.0,
+        description="For radial-profile jobs: Gaussian smoothing of the 1D profile.",
+    )
+    avg_period_1: int = Field(
+        default=5,
+        ge=1,
+        le=1000,
+        description="For difference jobs: first exponentially weighted moving-average period.",
+    )
+    avg_period_2: int = Field(
+        default=10,
+        ge=1,
+        le=1000,
+        description="For difference jobs: second exponentially weighted moving-average period.",
+    )
+    gaussian_sigma: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=20.0,
+        description="For difference and filtered-view jobs: optional Gaussian blur sigma.",
+    )
+    median_size: int = Field(
+        default=0,
+        ge=0,
+        le=21,
+        description="For filtered-view jobs: optional median-filter kernel size. 0 disables median filtering.",
+    )
+    fft_size: int = Field(
+        default=256,
+        ge=32,
+        le=1024,
+        description="For fft_map jobs: local FFT window size.",
+    )
+    spacing: int = Field(
+        default=256,
+        ge=1,
+        le=1024,
+        description="For fft_map jobs: stride between neighbouring windows.",
+    )
+    log_scale: bool = Field(
+        default=True,
+        description="For fft_map jobs: log-scale the FFT magnitude.",
+    )
+    mask_center_radius_px: float = Field(
+        default=5.0,
+        ge=0.0,
+        le=512.0,
+        description="For maximum_spot_mapping jobs: radius around the central beam to ignore.",
+    )
+    map_var: str = Field(
+        default="theta",
+        description="For maximum_spot_mapping jobs: 'theta' or 'radius'.",
+    )
+    subtract_mean_background: bool = Field(
+        default=False,
+        description="For maximum_spot_mapping jobs: subtract the mean diffraction pattern before processing.",
+    )
+
+    @field_validator("roi")
+    @classmethod
+    def validate_roi(cls, v: Optional[list[int]]) -> Optional[list[int]]:
+        if v is not None and len(v) != 4:
+            raise ValueError("roi must have exactly 4 elements: [top, left, bottom, right]")
+        return v
+
+
+class LiveProcessingJobQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    job_id: str = Field(description="Live-processing job identifier.")
+    include_data: bool = Field(
+        default=False,
+        description="If true, include base64-encoded pixel data in the latest result when available.",
+    )
 
 
 class AcquireSTEMInput(BaseModel):
@@ -258,7 +563,17 @@ class TiltSeriesInput(BaseModel):
 # Shared helper functions
 # ---------------------------------------------------------------------------
 
-def _image_to_response(img, include_data: bool = False) -> dict:
+def _tags_to_dict(tags: object) -> dict[str, object]:
+    if hasattr(tags, "to_dict"):
+        return dict(tags.to_dict())
+    return {}
+
+
+def _image_to_response(
+    img,
+    include_data: bool = False,
+    include_tags: bool = False,
+) -> dict:
     """Convert a SimImage / Py_Image to a JSON-serialisable summary dict."""
     arr = img.GetNumArray()
     tags = img.GetTagGroup()
@@ -288,7 +603,508 @@ def _image_to_response(img, include_data: bool = False) -> dict:
     }
     if include_data:
         summary["data_b64"] = base64.b64encode(arr.tobytes()).decode()
+    if include_tags:
+        summary["tags"] = _tags_to_dict(tags)
     return summary
+
+
+def _extract_roi(arr: np.ndarray, roi: Optional[list[int]]) -> np.ndarray:
+    if roi is None:
+        return arr
+
+    top, left, bottom, right = roi
+    if top < 0 or left < 0 or bottom > arr.shape[0] or right > arr.shape[1]:
+        raise ValueError("roi extends outside image bounds")
+    if bottom <= top or right <= left:
+        raise ValueError("roi must have positive height and width")
+    return arr[top:bottom, left:right]
+
+
+def _bin_image(arr: np.ndarray, binning: int) -> np.ndarray:
+    if binning <= 1:
+        return arr
+    h = (arr.shape[0] // binning) * binning
+    w = (arr.shape[1] // binning) * binning
+    if h == 0 or w == 0:
+        raise ValueError("binning is larger than the selected image region")
+    cropped = arr[:h, :w]
+    return cropped.reshape(h // binning, binning, w // binning, binning).mean(axis=(1, 3))
+
+
+def _copy_calibration(source_img, derived_img) -> None:
+    try:
+        for axis in range(2):
+            origin, scale, unit = source_img.GetDimensionCalibration(axis, 0)
+            derived_img.SetDimensionCalibration(axis, origin, scale, unit, 0)
+    except Exception:
+        return
+
+
+def _resolve_4dstem_array(img4d) -> np.ndarray:
+    arr = img4d.GetNumArray()
+    if arr.ndim == 2 and arr.shape[1] > arr.shape[0]:
+        scan_y = arr.shape[0]
+        total = arr.shape[1]
+        det_px = int(np.sqrt(total // scan_y))
+        scan_x = total // (det_px * det_px)
+        return arr.reshape(scan_y, scan_x, det_px, det_px)
+    if arr.ndim != 4:
+        raise ValueError("Front image is not a 4D-STEM dataset (expected 4D array).")
+    return arr
+
+
+def _create_derived_image(data: np.ndarray, name: str, source_img, show_result: bool):
+    derived = DM.CreateImage(np.asarray(data))
+    derived.SetName(name)
+    _copy_calibration(source_img, derived)
+    if show_result:
+        derived.ShowImage()
+    return derived
+
+
+def _hsv_to_rgb(h: np.ndarray, s: np.ndarray, v: np.ndarray) -> np.ndarray:
+    h = np.mod(h, 1.0)
+    i = np.floor(h * 6.0).astype(int)
+    f = h * 6.0 - i
+    p = v * (1.0 - s)
+    q = v * (1.0 - f * s)
+    t = v * (1.0 - (1.0 - f) * s)
+    i_mod = i % 6
+
+    out = np.empty(h.shape + (3,), dtype=np.float32)
+    masks = [i_mod == k for k in range(6)]
+    out[masks[0]] = np.stack((v, t, p), axis=-1)[masks[0]]
+    out[masks[1]] = np.stack((q, v, p), axis=-1)[masks[1]]
+    out[masks[2]] = np.stack((p, v, t), axis=-1)[masks[2]]
+    out[masks[3]] = np.stack((p, q, v), axis=-1)[masks[3]]
+    out[masks[4]] = np.stack((t, p, v), axis=-1)[masks[4]]
+    out[masks[5]] = np.stack((v, p, q), axis=-1)[masks[5]]
+    return out
+
+
+_live_jobs: dict[str, dict[str, object]] = {}
+_live_jobs_lock = threading.Lock()
+
+
+def _live_jobs_use_bridge() -> bool:
+    return bool(_BRIDGE_ZMQ_ENDPOINT)
+
+
+def _bridge_dispatch(function_name: str, params: dict[str, object]) -> dict[str, object]:
+    if not _BRIDGE_ZMQ_ENDPOINT:
+        raise RuntimeError("GMS_MCP_ZMQ is not configured.")
+
+    try:
+        import zmq
+    except ImportError as exc:
+        raise RuntimeError(
+            "pyzmq is required for bridge mode. Install the 'zmq' extra before using GMS_MCP_ZMQ."
+        ) from exc
+
+    context = zmq.Context()
+    socket = context.socket(zmq.REQ)
+    socket.setsockopt(zmq.LINGER, 0)
+    socket.setsockopt(zmq.RCVTIMEO, _BRIDGE_ZMQ_TIMEOUT_MS)
+    socket.setsockopt(zmq.SNDTIMEO, _BRIDGE_ZMQ_TIMEOUT_MS)
+
+    try:
+        socket.connect(_BRIDGE_ZMQ_ENDPOINT)
+        payload = {"function": function_name, "params": params}
+        socket.send_json(payload)
+        response = socket.recv_json()
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to communicate with the GMS DM bridge at {_BRIDGE_ZMQ_ENDPOINT}: {exc}"
+        ) from exc
+    finally:
+        socket.close()
+        context.term()
+
+    if not isinstance(response, dict):
+        raise RuntimeError("Bridge response is malformed.")
+    return response
+
+
+def _summarize_array(data: np.ndarray) -> dict[str, object]:
+    arr = np.asarray(data)
+    return {
+        "shape": list(arr.shape),
+        "dtype": str(arr.dtype),
+        "statistics": {
+            "min": float(arr.min()),
+            "max": float(arr.max()),
+            "mean": float(arr.mean()),
+            "std": float(arr.std()),
+        },
+    }
+
+
+def _encode_array_b64(data: np.ndarray) -> dict[str, object]:
+    arr = np.asarray(data)
+    return {
+        "data_b64": base64.b64encode(arr.tobytes()).decode(),
+        "data_shape": list(arr.shape),
+        "data_dtype": str(arr.dtype),
+    }
+
+
+def _copy_into_result_image(result_img, data: np.ndarray) -> None:
+    target = result_img.GetNumArray()
+    target[...] = np.asarray(data, dtype=target.dtype)
+    result_img.UpdateImage()
+
+
+def _exponential_moving_average(frame: np.ndarray, previous: np.ndarray, period: int) -> np.ndarray:
+    if period <= 1:
+        return frame.astype(np.float32)
+    persistence = (period - 1) / (period + 1)
+    return persistence * previous.astype(np.float32) + (1.0 - persistence) * frame.astype(np.float32)
+
+
+def _compute_radial_profile_result(data: np.ndarray, params: StartLiveProcessingJobInput | RadialProfileInput) -> dict[str, object]:
+    roi_data = _extract_roi(data, params.roi)
+    if params.mode == "fft" if isinstance(params, RadialProfileInput) else params.profile_mode == "fft":
+        working = np.abs(np.fft.fftshift(np.fft.fft2(roi_data))).astype(np.float32)
+        unit = "nm^-1"
+    else:
+        working = roi_data.copy()
+        unit = "px"
+
+    binning = params.binning
+    working = _bin_image(working, binning)
+    mask_center_lines = params.mask_center_lines
+    if mask_center_lines:
+        cx = working.shape[1] // 2
+        cy = working.shape[0] // 2
+        working[:, max(0, cx - 1):cx + 1] = 0.0
+        working[max(0, cy - 1):cy + 1, :] = 0.0
+
+    h, w = working.shape
+    cy = h / 2.0
+    cx = w / 2.0
+    yy, xx = np.indices((h, w), dtype=np.float32)
+    radii = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
+    radial_index = radii.astype(int)
+    max_radius = min(h, w) // 2
+
+    radial_mean = np.zeros(max_radius, dtype=np.float32)
+    radial_max = np.zeros(max_radius, dtype=np.float32)
+    for radius in range(max_radius):
+        mask = radial_index == radius
+        if not np.any(mask):
+            continue
+        values = working[mask]
+        radial_mean[radius] = float(values.mean())
+        radial_max[radius] = float(values.max())
+
+    metric = params.profile_metric
+    if metric == "radial_mean":
+        profile = radial_mean
+    elif metric == "radial_max":
+        profile = radial_max
+    else:
+        profile = radial_max - radial_mean
+
+    smooth_sigma = params.smooth_sigma
+    if smooth_sigma > 0:
+        profile = gaussian_filter(profile, sigma=smooth_sigma)
+
+    ignore_bins = int(len(profile) * params.mask_percent / 100.0)
+    if ignore_bins > 0:
+        profile[:ignore_bins] = 0.0
+
+    peak_positions: list[int] = []
+    try:
+        from scipy.signal import find_peaks
+
+        peaks, _ = find_peaks(profile, height=profile.mean() + profile.std())
+        peak_positions = peaks.tolist()[:12]
+    except Exception:
+        peak_positions = []
+
+    return {
+        "data": profile.astype(np.float32),
+        "summary": {
+            "mode": params.mode if isinstance(params, RadialProfileInput) else params.profile_mode,
+            "profile_metric": metric,
+            "profile_length": int(len(profile)),
+            "unit": unit,
+            "peak_positions": peak_positions,
+        },
+    }
+
+
+def _compute_max_fft_result(data: np.ndarray, params: StartLiveProcessingJobInput | MaxFFTInput) -> dict[str, object]:
+    roi_data = _extract_roi(data, params.roi)
+    if roi_data.shape[0] < params.fft_size or roi_data.shape[1] < params.fft_size:
+        raise ValueError("Selected image region is smaller than fft_size.")
+
+    view = np.lib.stride_tricks.sliding_window_view(roi_data, (params.fft_size, params.fft_size))
+    windows = view[::params.spacing, ::params.spacing]
+    if windows.size == 0:
+        windows = view[:1, :1]
+
+    hann_1d: np.ndarray = np.hanning(params.fft_size).astype(np.float32)
+    hann_2d = np.sqrt(np.outer(hann_1d, hann_1d)).astype(np.float32)
+    spectra = np.abs(np.fft.fftshift(np.fft.fft2(windows * hann_2d, axes=(-2, -1)), axes=(-2, -1)))
+    max_fft = spectra.max(axis=(0, 1)).astype(np.float32)
+    if params.log_scale:
+        max_fft = np.log1p(max_fft)
+
+    return {
+        "data": max_fft,
+        "summary": {
+            "fft_size": params.fft_size,
+            "spacing": params.spacing,
+            "log_scale": params.log_scale,
+            "n_windows": int(windows.shape[0] * windows.shape[1]),
+        },
+    }
+
+
+def _compute_maximum_spot_mapping_result(
+    data4d: np.ndarray, params: StartLiveProcessingJobInput | MaxSpotMapInput
+) -> dict[str, object]:
+    arr = np.asarray(data4d, dtype=np.float32)
+    if arr.ndim != 4:
+        raise ValueError("Maximum spot mapping requires a 4D-STEM dataset.")
+
+    working = arr.copy()
+    scan_y, scan_x, det_y, det_x = working.shape
+    cy = (det_y - 1) / 2.0
+    cx = (det_x - 1) / 2.0
+
+    if params.subtract_mean_background:
+        mean_pattern = working.mean(axis=(0, 1), keepdims=True)
+        working = np.maximum(working - mean_pattern, 0.0)
+    if params.gaussian_sigma > 0:
+        working = gaussian_filter(working, sigma=(0, 0, params.gaussian_sigma, params.gaussian_sigma))
+
+    yy, xx = np.indices((det_y, det_x), dtype=np.float32)
+    rr = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
+    mask = rr <= params.mask_center_radius_px
+    working[:, :, mask] = -np.inf
+
+    flat = working.reshape(scan_y, scan_x, det_y * det_x)
+    max_idx = np.argmax(flat, axis=-1)
+    intensity_map = np.take_along_axis(flat, max_idx[..., None], axis=-1).squeeze(-1)
+    y_idx, x_idx = np.divmod(max_idx, det_x)
+    dx = x_idx.astype(np.float32) - cx
+    dy = y_idx.astype(np.float32) - cy
+    theta_map = (np.arctan2(dy, dx) + np.pi) / (2.0 * np.pi)
+    radius_map = np.sqrt(dx ** 2 + dy ** 2)
+
+    if params.map_var == "theta":
+        hue = theta_map
+    elif params.map_var == "radius":
+        radius_max = max(float(radius_map.max()), 1.0)
+        hue = radius_map / radius_max
+    else:
+        raise ValueError("map_var must be 'theta' or 'radius'.")
+
+    intensity_norm = intensity_map - intensity_map.min()
+    if float(intensity_norm.max()) > 0:
+        intensity_norm = intensity_norm / intensity_norm.max()
+    saturation = np.ones_like(hue, dtype=np.float32)
+    rgb: np.ndarray = _hsv_to_rgb(
+        hue.astype(np.float32), saturation, intensity_norm.astype(np.float32)
+    ).astype(np.float32)
+
+    return {
+        "data": rgb,
+        "summary": {
+            "type": "maximum_spot_mapping",
+            "map_var": params.map_var,
+            "scan_shape": [scan_y, scan_x],
+            "mask_center_radius_px": params.mask_center_radius_px,
+            "subtract_mean_background": params.subtract_mean_background,
+            "gaussian_sigma": params.gaussian_sigma,
+            "theta_range": [float(theta_map.min()), float(theta_map.max())],
+            "radius_range": [float(radius_map.min()), float(radius_map.max())],
+            "intensity_range": [float(intensity_map.min()), float(intensity_map.max())],
+        },
+    }
+
+
+def _compute_difference_result(data: np.ndarray, job: dict[str, object]) -> dict[str, object]:
+    params = job["params"]
+    assert isinstance(params, StartLiveProcessingJobInput)
+    frame: np.ndarray = _extract_roi(data, params.roi).astype(np.float32)
+    if params.gaussian_sigma > 0:
+        frame = gaussian_filter(frame, sigma=params.gaussian_sigma)
+
+    avg1 = job.get("avg1")
+    avg2 = job.get("avg2")
+    if not isinstance(avg1, np.ndarray):
+        avg1 = frame.copy()
+    if not isinstance(avg2, np.ndarray):
+        avg2 = frame.copy()
+
+    avg1 = _exponential_moving_average(frame, avg1, params.avg_period_1)
+    avg2 = _exponential_moving_average(frame, avg2, params.avg_period_2)
+    diff = np.abs(avg2 - avg1).astype(np.float32)
+    job["avg1"] = avg1
+    job["avg2"] = avg2
+
+    return {
+        "data": diff,
+        "summary": {
+            "avg_period_1": params.avg_period_1,
+            "avg_period_2": params.avg_period_2,
+            "gaussian_sigma": params.gaussian_sigma,
+        },
+    }
+
+
+def _compute_filtered_view_result(
+    data: np.ndarray, params: StartLiveProcessingJobInput
+) -> dict[str, object]:
+    filtered: np.ndarray = _extract_roi(data, params.roi).astype(np.float32)
+    if params.median_size > 1:
+        filtered = median_filter(filtered, size=params.median_size)
+    if params.gaussian_sigma > 0:
+        filtered = gaussian_filter(filtered, sigma=params.gaussian_sigma)
+
+    return {
+        "data": filtered.astype(np.float32),
+        "summary": {
+            "median_size": params.median_size,
+            "gaussian_sigma": params.gaussian_sigma,
+        },
+    }
+
+
+def _get_live_job(job_id: str) -> dict[str, object]:
+    with _live_jobs_lock:
+        job = _live_jobs.get(job_id)
+    if job is None:
+        raise KeyError(f"Unknown live-processing job: {job_id}")
+    return job
+
+
+def _job_status_payload(job: dict[str, object]) -> dict[str, object]:
+    latest_result = job.get("latest_result")
+    result_summary: dict[str, object] | None = None
+    if isinstance(latest_result, dict):
+        summary = latest_result.get("summary", {})
+        data = latest_result.get("data")
+        if isinstance(summary, dict) and isinstance(data, np.ndarray):
+            result_summary = dict(summary)
+            result_summary.update(_summarize_array(data))
+
+    return {
+        "job_id": job["job_id"],
+        "job_type": job["job_type"],
+        "backend": job.get("backend", "local"),
+        "status": job["status"],
+        "poll_interval_s": job["poll_interval_s"],
+        "iterations": job["iterations"],
+        "created_at": job["created_at"],
+        "last_updated": job["last_updated"],
+        "last_error": job["last_error"],
+        "source_image_name": getattr(job.get("source_image"), "GetName", lambda: None)(),
+        "result_summary": result_summary,
+    }
+
+
+def _run_live_processing_job(job_id: str) -> None:
+    job = _get_live_job(job_id)
+    stop_event = job["stop_event"]
+    assert isinstance(stop_event, threading.Event)
+    params = job["params"]
+    assert isinstance(params, StartLiveProcessingJobInput)
+
+    while not stop_event.is_set():
+        try:
+            source_image = job.get("source_image")
+            if source_image is None:
+                source_image = DM.GetFrontImage()
+                job["source_image"] = source_image
+            if not hasattr(source_image, "GetNumArray"):
+                raise ValueError("Live-processing source image is invalid or unavailable.")
+
+            source_image_obj = cast(Any, source_image)
+            data = np.asarray(source_image_obj.GetNumArray(), dtype=np.float32)
+            if data.ndim != 2 and params.job_type in {"radial_profile", "difference", "fft_map", "filtered_view"}:
+                raise ValueError("Live processing requires a 2D source image for the selected job type.")
+
+            if params.job_type == "radial_profile":
+                radial_params = RadialProfileInput(
+                    mode=params.profile_mode,
+                    roi=params.roi,
+                    binning=params.binning,
+                    mask_center_lines=params.mask_center_lines,
+                    mask_percent=params.mask_percent,
+                    profile_metric=params.profile_metric,
+                    smooth_sigma=params.smooth_sigma,
+                )
+                result = _compute_radial_profile_result(data, radial_params)
+                profile = result["data"]
+                assert isinstance(profile, np.ndarray)
+
+                history = job.get("history")
+                if not isinstance(history, np.ndarray) or history.shape[0] != profile.shape[0]:
+                    history = np.zeros((profile.shape[0], params.history_length), dtype=np.float32)
+                    job["history"] = history
+                history[:, :-1] = history[:, 1:]
+                history[:, -1] = profile
+                result["data"] = history.copy()
+                summary_payload = result.get("summary")
+                assert isinstance(summary_payload, dict)
+                result["summary"] = {
+                    **summary_payload,
+                    "history_length": params.history_length,
+                }
+            elif params.job_type == "difference":
+                result = _compute_difference_result(data, job)
+            elif params.job_type == "fft_map":
+                fft_params = MaxFFTInput(
+                    roi=params.roi,
+                    fft_size=params.fft_size,
+                    spacing=params.spacing,
+                    log_scale=params.log_scale,
+                    output_name=params.output_name or f"live_fft_map_{job_id}",
+                    show_result=params.show_result,
+                )
+                result = _compute_max_fft_result(data, fft_params)
+            elif params.job_type == "filtered_view":
+                result = _compute_filtered_view_result(data, params)
+            elif params.job_type == "maximum_spot_mapping":
+                dataset4d: np.ndarray = _resolve_4dstem_array(source_image_obj).astype(np.float32)
+                result = _compute_maximum_spot_mapping_result(dataset4d, params)
+            else:
+                raise ValueError(f"Unsupported live-processing job type: {params.job_type}")
+
+            result_data = result["data"]
+            assert isinstance(result_data, np.ndarray)
+            job["latest_result"] = result
+            iterations = job.get("iterations", 0)
+            job["iterations"] = int(iterations) + 1 if isinstance(iterations, (int, float, str)) else 1
+            job["last_updated"] = time.time()
+            job["last_error"] = None
+            job["status"] = "running"
+
+            if params.show_result:
+                result_image = job.get("result_image")
+                if result_image is None:
+                    result_image = _create_derived_image(
+                        result_data.astype(np.float32),
+                        params.output_name or f"live_{params.job_type}_{job_id}",
+                        source_image,
+                        True,
+                    )
+                    job["result_image"] = result_image
+                else:
+                    _copy_into_result_image(result_image, result_data)
+        except Exception as exc:
+            job["status"] = "error"
+            job["last_error"] = str(exc)
+            job["last_updated"] = time.time()
+        stop_event.wait(params.poll_interval_s)
+
+    if job["status"] != "error":
+        job["status"] = "stopped"
+    job["last_updated"] = time.time()
 
 
 def _build_error(msg: str, suggestion: str = "") -> str:
@@ -371,6 +1187,503 @@ def gms_get_microscope_state() -> str:
 
 
 # ---------------------------------------------------------------------------
+# TOOL: front image access
+# ---------------------------------------------------------------------------
+
+@mcp.tool(
+    name="gms_get_front_image",
+    annotations={"readOnlyHint": True, "destructiveHint": False,
+                 "idempotentHint": True, "openWorldHint": False},
+)
+def gms_get_front_image(params: FrontImageInput = FrontImageInput()) -> str:
+    """
+    Return metadata for the front-most image in the GMS workspace.
+
+    Parameters:
+        params.include_data (bool): Include base64-encoded pixel data.
+        params.include_tags (bool): Include serialisable image tags when available.
+    """
+    try:
+        img = DM.GetFrontImage()
+        result = {"success": True, "image": _image_to_response(
+            img,
+            include_data=params.include_data,
+            include_tags=params.include_tags,
+        )}
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        return _build_error(str(e), "Ensure a front-most image is available in GMS.")
+
+
+# ---------------------------------------------------------------------------
+# TOOL: filtered image generation
+# ---------------------------------------------------------------------------
+
+@mcp.tool(
+    name="gms_apply_image_filter",
+    annotations={"readOnlyHint": False, "destructiveHint": False,
+                 "idempotentHint": True, "openWorldHint": False},
+)
+def gms_apply_image_filter(params: ImageFilterInput) -> str:
+    """
+    Apply median and/or Gaussian filtering to the front-most image or ROI.
+    """
+    try:
+        source = DM.GetFrontImage()
+        arr = np.asarray(source.GetNumArray(), dtype=np.float32)
+        if arr.ndim != 2:
+            return _build_error("Front image must be 2D for image filtering.")
+
+        filtered = _extract_roi(arr, params.roi).copy()
+        if params.median_size > 0:
+            filtered = median_filter(filtered, size=params.median_size)
+        if params.gaussian_sigma > 0:
+            filtered = gaussian_filter(filtered, sigma=params.gaussian_sigma)
+
+        result_img = _create_derived_image(
+            filtered.astype(np.float32),
+            params.output_name,
+            source,
+            params.show_result,
+        )
+        result = {
+            "success": True,
+            "operation": {
+                "median_size": params.median_size,
+                "gaussian_sigma": params.gaussian_sigma,
+                "roi": params.roi,
+            },
+            "image": _image_to_response(result_img),
+        }
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        return _build_error(str(e), "Verify the front image is a 2D image and the ROI is valid.")
+
+
+# ---------------------------------------------------------------------------
+# TOOL: radial profile from diffraction or FFT
+# ---------------------------------------------------------------------------
+
+@mcp.tool(
+    name="gms_compute_radial_profile",
+    annotations={"readOnlyHint": True, "destructiveHint": False,
+                 "idempotentHint": True, "openWorldHint": False},
+)
+def gms_compute_radial_profile(params: RadialProfileInput) -> str:
+    """
+    Compute a 1D radial profile from a diffraction pattern or from the FFT of a TEM image.
+    """
+    try:
+        source = DM.GetFrontImage()
+        data = np.asarray(source.GetNumArray(), dtype=np.float32)
+        if data.ndim != 2:
+            return _build_error("Front image must be 2D for radial-profile analysis.")
+
+        roi_data = _extract_roi(data, params.roi)
+        if params.mode == "fft":
+            working = np.abs(np.fft.fftshift(np.fft.fft2(roi_data))).astype(np.float32)
+            unit = "nm^-1"
+        elif params.mode == "diffraction":
+            working = roi_data.copy()
+            unit = "px"
+        else:
+            return _build_error("mode must be 'fft' or 'diffraction'.")
+
+        working = _bin_image(working, params.binning)
+        if params.mask_center_lines:
+            cx = working.shape[1] // 2
+            cy = working.shape[0] // 2
+            working[:, max(0, cx - 1):cx + 1] = 0.0
+            working[max(0, cy - 1):cy + 1, :] = 0.0
+
+        h, w = working.shape
+        cy, cx = h / 2.0, w / 2.0
+        yy, xx = np.indices((h, w), dtype=np.float32)
+        radii = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
+        radial_index = radii.astype(int)
+        max_radius = min(h, w) // 2
+
+        radial_mean = np.zeros(max_radius, dtype=np.float32)
+        radial_max = np.zeros(max_radius, dtype=np.float32)
+        for radius in range(max_radius):
+            mask = radial_index == radius
+            if not np.any(mask):
+                continue
+            values = working[mask]
+            radial_mean[radius] = float(values.mean())
+            radial_max[radius] = float(values.max())
+
+        if params.profile_metric == "radial_mean":
+            profile = radial_mean
+        elif params.profile_metric == "radial_max":
+            profile = radial_max
+        elif params.profile_metric == "radial_max_minus_mean":
+            profile = radial_max - radial_mean
+        else:
+            return _build_error(
+                "profile_metric must be 'radial_max_minus_mean', 'radial_mean', or 'radial_max'."
+            )
+
+        if params.smooth_sigma > 0:
+            profile = gaussian_filter(profile, sigma=params.smooth_sigma)
+
+        ignore_bins = int(len(profile) * params.mask_percent / 100.0)
+        if ignore_bins > 0:
+            profile[:ignore_bins] = 0.0
+
+        peak_positions = []
+        try:
+            from scipy.signal import find_peaks
+
+            peaks, _ = find_peaks(profile, height=profile.mean() + profile.std())
+            peak_positions = peaks.tolist()[:12]
+        except Exception:
+            peak_positions = []
+
+        result = {
+            "success": True,
+            "analysis": {
+                "mode": params.mode,
+                "profile_metric": params.profile_metric,
+                "roi": params.roi,
+                "binning": params.binning,
+                "mask_center_lines": params.mask_center_lines,
+                "mask_percent": params.mask_percent,
+                "smooth_sigma": params.smooth_sigma,
+                "profile_length": int(len(profile)),
+                "unit": unit,
+                "peak_positions": peak_positions,
+            },
+            "profile": profile.astype(np.float32).tolist(),
+        }
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        return _build_error(str(e), "Verify the front image is a 2D image and the ROI is valid.")
+
+
+# ---------------------------------------------------------------------------
+# TOOL: maximum FFT image from local windows
+# ---------------------------------------------------------------------------
+
+@mcp.tool(
+    name="gms_compute_max_fft",
+    annotations={"readOnlyHint": True, "destructiveHint": False,
+                 "idempotentHint": True, "openWorldHint": False},
+)
+def gms_compute_max_fft(params: MaxFFTInput) -> str:
+    """
+    Compute the maximum FFT across a grid of local windows from the front-most image.
+    """
+    try:
+        source = DM.GetFrontImage()
+        data = np.asarray(source.GetNumArray(), dtype=np.float32)
+        if data.ndim != 2:
+            return _build_error("Front image must be 2D for max-FFT analysis.")
+
+        roi_data = _extract_roi(data, params.roi)
+        if roi_data.shape[0] < params.fft_size or roi_data.shape[1] < params.fft_size:
+            return _build_error("Selected image region is smaller than fft_size.")
+
+        view = np.lib.stride_tricks.sliding_window_view(roi_data, (params.fft_size, params.fft_size))
+        windows = view[::params.spacing, ::params.spacing]
+        if windows.size == 0:
+            windows = view[:1, :1]
+
+        hann_1d: np.ndarray = np.hanning(params.fft_size).astype(np.float32)
+        hann_2d = np.sqrt(np.outer(hann_1d, hann_1d)).astype(np.float32)
+        spectra = np.abs(np.fft.fftshift(np.fft.fft2(windows * hann_2d, axes=(-2, -1)), axes=(-2, -1)))
+        max_fft = spectra.max(axis=(0, 1)).astype(np.float32)
+        if params.log_scale:
+            max_fft = np.log1p(max_fft)
+
+        result_img = _create_derived_image(max_fft, params.output_name, source, params.show_result)
+        result = {
+            "success": True,
+            "analysis": {
+                "roi": params.roi,
+                "fft_size": params.fft_size,
+                "spacing": params.spacing,
+                "log_scale": params.log_scale,
+                "n_windows": int(windows.shape[0] * windows.shape[1]),
+            },
+            "image": _image_to_response(result_img),
+        }
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        return _build_error(str(e), "Verify the front image is a 2D image and the ROI is valid.")
+
+
+# ---------------------------------------------------------------------------
+# TOOL: 4D-STEM maximum-spot mapping
+# ---------------------------------------------------------------------------
+
+@mcp.tool(
+    name="gms_run_4dstem_maximum_spot_mapping",
+    annotations={"readOnlyHint": True, "destructiveHint": False,
+                 "idempotentHint": True, "openWorldHint": False},
+)
+def gms_run_4dstem_maximum_spot_mapping(params: MaxSpotMapInput) -> str:
+    """
+    Compute a maximum-spot orientation-like map from the loaded 4D-STEM dataset.
+    """
+    try:
+        img4d = DM.GetFrontImage()
+        arr: np.ndarray = _resolve_4dstem_array(img4d).astype(np.float32)
+        scan_y, scan_x, det_y, det_x = arr.shape
+        cy = (det_y - 1) / 2.0
+        cx = (det_x - 1) / 2.0
+
+        working = arr.copy()
+        if params.subtract_mean_background:
+            mean_pattern = working.mean(axis=(0, 1), keepdims=True)
+            working = np.maximum(working - mean_pattern, 0.0)
+        if params.gaussian_sigma > 0:
+            working = gaussian_filter(working, sigma=(0, 0, params.gaussian_sigma, params.gaussian_sigma))
+
+        yy, xx = np.indices((det_y, det_x), dtype=np.float32)
+        rr = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
+        mask = rr <= params.mask_center_radius_px
+        working[:, :, mask] = -np.inf
+
+        flat = working.reshape(scan_y, scan_x, det_y * det_x)
+        max_idx = np.argmax(flat, axis=-1)
+        intensity_map = np.take_along_axis(flat, max_idx[..., None], axis=-1).squeeze(-1)
+        y_idx, x_idx = np.divmod(max_idx, det_x)
+        dx = x_idx.astype(np.float32) - cx
+        dy = y_idx.astype(np.float32) - cy
+        theta_map = (np.arctan2(dy, dx) + np.pi) / (2.0 * np.pi)
+        radius_map = np.sqrt(dx ** 2 + dy ** 2)
+
+        if params.map_var == "theta":
+            hue = theta_map
+        elif params.map_var == "radius":
+            radius_max = max(float(radius_map.max()), 1.0)
+            hue = radius_map / radius_max
+        else:
+            return _build_error("map_var must be 'theta' or 'radius'.")
+
+        intensity_norm = intensity_map - intensity_map.min()
+        if float(intensity_norm.max()) > 0:
+            intensity_norm = intensity_norm / intensity_norm.max()
+        saturation = np.ones_like(hue, dtype=np.float32)
+        rgb = _hsv_to_rgb(hue.astype(np.float32), saturation, intensity_norm.astype(np.float32))
+
+        result_img = _create_derived_image(rgb.astype(np.float32), params.output_name, img4d, params.show_result)
+        result = {
+            "success": True,
+            "analysis": {
+                "type": "maximum_spot_mapping",
+                "map_var": params.map_var,
+                "scan_shape": [scan_y, scan_x],
+                "mask_center_radius_px": params.mask_center_radius_px,
+                "subtract_mean_background": params.subtract_mean_background,
+                "gaussian_sigma": params.gaussian_sigma,
+            },
+            "maps": {
+                "theta_range": [float(theta_map.min()), float(theta_map.max())],
+                "radius_range": [float(radius_map.min()), float(radius_map.max())],
+                "intensity_range": [float(intensity_map.min()), float(intensity_map.max())],
+            },
+            "image": _image_to_response(result_img),
+        }
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        return _build_error(str(e), "Acquire a 4D-STEM dataset first with gms_acquire_4d_stem.")
+
+
+# ---------------------------------------------------------------------------
+# TOOL: persistent live-processing job API
+# ---------------------------------------------------------------------------
+
+@mcp.tool(
+    name="gms_start_live_processing_job",
+    annotations={"readOnlyHint": False, "destructiveHint": False,
+                 "idempotentHint": False, "openWorldHint": False},
+)
+def gms_start_live_processing_job(params: StartLiveProcessingJobInput) -> str:
+    """
+    Start a persistent live-processing job for radial profiles, live difference, live FFT maps, or live filtered views.
+    """
+    try:
+        if params.job_type not in {"radial_profile", "difference", "fft_map", "filtered_view", "maximum_spot_mapping"}:
+            return _build_error(
+                "job_type must be 'radial_profile', 'difference', 'fft_map', 'filtered_view', or 'maximum_spot_mapping'."
+            )
+
+        if _live_jobs_use_bridge():
+            payload = _bridge_dispatch("LiveProcessingJobStart", params.model_dump())
+            return json.dumps(payload, indent=2)
+
+        source_image = DM.GetFrontImage()
+        source_data = np.asarray(source_image.GetNumArray())
+        if params.job_type == "maximum_spot_mapping":
+            try:
+                _resolve_4dstem_array(source_image)
+            except Exception as exc:
+                return _build_error(
+                    str(exc),
+                    "Acquire or select a 4D-STEM dataset before starting a live maximum-spot-mapping job.",
+                )
+        elif source_data.ndim != 2:
+            return _build_error(
+                "Live-processing jobs currently require a 2D front-most image.",
+                "Acquire or select a 2D TEM/STEM/diffraction image before starting the job.",
+            )
+
+        job_id = uuid.uuid4().hex[:12]
+        stop_event = threading.Event()
+        job: dict[str, object] = {
+            "job_id": job_id,
+            "job_type": params.job_type,
+            "backend": "local",
+            "params": params,
+            "poll_interval_s": params.poll_interval_s,
+            "source_image": source_image,
+            "created_at": time.time(),
+            "last_updated": None,
+            "status": "starting",
+            "iterations": 0,
+            "last_error": None,
+            "latest_result": None,
+            "result_image": None,
+            "history": None,
+            "avg1": None,
+            "avg2": None,
+            "stop_event": stop_event,
+        }
+
+        thread = threading.Thread(
+            target=_run_live_processing_job,
+            args=(job_id,),
+            daemon=True,
+            name=f"gms-live-job-{job_id}",
+        )
+        job["thread"] = thread
+
+        with _live_jobs_lock:
+            _live_jobs[job_id] = job
+
+        thread.start()
+
+        result = {
+            "success": True,
+            "job": {
+                "job_id": job_id,
+                "job_type": params.job_type,
+                "backend": "local",
+                "status": "starting",
+                "poll_interval_s": params.poll_interval_s,
+                "show_result": params.show_result,
+                "source_image_name": source_image.GetName(),
+            },
+        }
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        return _build_error(str(e), "Ensure a valid 2D front image is available before starting a live job.")
+
+
+@mcp.tool(
+    name="gms_get_live_processing_job_status",
+    annotations={"readOnlyHint": True, "destructiveHint": False,
+                 "idempotentHint": True, "openWorldHint": False},
+)
+def gms_get_live_processing_job_status(params: LiveProcessingJobQuery) -> str:
+    """
+    Get the current status of a live-processing job.
+    """
+    try:
+        try:
+            job = _get_live_job(params.job_id)
+            return json.dumps({"success": True, "job": _job_status_payload(job)}, indent=2)
+        except KeyError:
+            if _live_jobs_use_bridge():
+                payload = _bridge_dispatch("LiveProcessingJobStatus", params.model_dump())
+                return json.dumps(payload, indent=2)
+            raise
+    except KeyError as e:
+        return _build_error(str(e))
+    except Exception as e:
+        return _build_error(str(e))
+
+
+@mcp.tool(
+    name="gms_get_live_processing_job_result",
+    annotations={"readOnlyHint": True, "destructiveHint": False,
+                 "idempotentHint": True, "openWorldHint": False},
+)
+def gms_get_live_processing_job_result(params: LiveProcessingJobQuery) -> str:
+    """
+    Get the latest derived result produced by a live-processing job.
+    """
+    try:
+        try:
+            job = _get_live_job(params.job_id)
+        except KeyError:
+            if _live_jobs_use_bridge():
+                bridge_payload = _bridge_dispatch("LiveProcessingJobResult", params.model_dump())
+                return json.dumps(bridge_payload, indent=2)
+            raise
+        latest_result = job.get("latest_result")
+        if not isinstance(latest_result, dict):
+            return _build_error("Live-processing job has not produced a result yet.")
+
+        data = latest_result.get("data")
+        summary = latest_result.get("summary")
+        if not isinstance(data, np.ndarray) or not isinstance(summary, dict):
+            return _build_error("Live-processing job result is malformed.")
+
+        result_payload: dict[str, object] = {
+            **summary,
+            **_summarize_array(data),
+        }
+        payload: dict[str, object] = {
+            "success": True,
+            "job": _job_status_payload(job),
+            "result": result_payload,
+        }
+        include_data = params.include_data or bool(getattr(job.get("params"), "include_result_data", False))
+        if include_data:
+            result_payload.update(_encode_array_b64(data))
+        return json.dumps(payload, indent=2)
+    except KeyError as e:
+        return _build_error(str(e))
+    except Exception as e:
+        return _build_error(str(e))
+
+
+@mcp.tool(
+    name="gms_stop_live_processing_job",
+    annotations={"readOnlyHint": False, "destructiveHint": False,
+                 "idempotentHint": True, "openWorldHint": False},
+)
+def gms_stop_live_processing_job(params: LiveProcessingJobQuery) -> str:
+    """
+    Stop a live-processing job and return its final status.
+    """
+    try:
+        try:
+            job = _get_live_job(params.job_id)
+        except KeyError:
+            if _live_jobs_use_bridge():
+                payload = _bridge_dispatch("LiveProcessingJobStop", params.model_dump())
+                return json.dumps(payload, indent=2)
+            raise
+        stop_event = job.get("stop_event")
+        thread = job.get("thread")
+        if isinstance(stop_event, threading.Event):
+            stop_event.set()
+        if isinstance(thread, threading.Thread):
+            poll_interval = job.get("poll_interval_s", 0.5)
+            timeout_s = float(poll_interval) * 3.0 if isinstance(poll_interval, (int, float, str)) else 2.0
+            thread.join(timeout=max(2.0, timeout_s))
+        return json.dumps({"success": True, "job": _job_status_payload(job)}, indent=2)
+    except KeyError as e:
+        return _build_error(str(e))
+    except Exception as e:
+        return _build_error(str(e))
+
+
+# ---------------------------------------------------------------------------
 # TOOL: TEM / HRTEM image acquisition
 # ---------------------------------------------------------------------------
 
@@ -395,6 +1708,8 @@ def gms_acquire_tem_image(params: AcquireTEMInput) -> str:
         - Acquisition metadata (exposure, HT, magnification)
     """
     try:
+        if _SIMULATE and hasattr(DM, "_state"):
+            DM._state.operation_mode = "TEM"
         camera = DM.CM_GetCurrentCamera()
         acq = DM.CM_CreateAcquisitionParameters_FullCCD(
             camera, params.processing, params.exposure_s,
@@ -705,6 +2020,10 @@ def gms_acquire_diffraction(params: AcquireDiffractionInput) -> str:
         if params.camera_length_mm is not None:
             DM.EMSetCameraLength(params.camera_length_mm)
         cl = DM.EMGetCameraLength() if DM.EMCanGetCameraLength() else 100.0
+        previous_mode = None
+        if _SIMULATE and hasattr(DM, "_state"):
+            previous_mode = DM._state.operation_mode
+            DM._state.operation_mode = "DIFFRACTION"
 
         camera = DM.CM_GetCurrentCamera()
         acq = DM.CM_CreateAcquisitionParameters_FullCCD(
@@ -713,6 +2032,8 @@ def gms_acquire_diffraction(params: AcquireDiffractionInput) -> str:
         DM.CM_Validate_AcquisitionParameters(camera, acq)
         dp = DM.CM_AcquireImage(camera, acq)
         dp.SetName(f"DP_CL{cl}mm_exp{params.exposure_s}s")
+        if previous_mode is not None:
+            DM._state.operation_mode = previous_mode
 
         arr = dp.GetNumArray()
         h, w = arr.shape[:2]

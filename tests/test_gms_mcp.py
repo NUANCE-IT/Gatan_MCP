@@ -27,6 +27,7 @@ import os
 import sys
 import subprocess
 import asyncio
+import time
 from pathlib import Path
 
 import numpy as np
@@ -199,6 +200,23 @@ class TestMCPServerTools:
     def _parse(self, raw: str) -> dict:
         return json.loads(raw)
 
+    def _wait_for_live_job(self, server, job_id: str, min_iterations: int = 1) -> dict:
+        from gms_mcp.server import LiveProcessingJobQuery
+
+        deadline = time.time() + 5.0
+        last = None
+        while time.time() < deadline:
+            last = self._parse(
+                server.gms_get_live_processing_job_status(
+                    LiveProcessingJobQuery(job_id=job_id)
+                )
+            )
+            if last["success"] and last["job"]["iterations"] >= min_iterations:
+                return last
+            time.sleep(0.1)
+        assert last is not None
+        return last
+
     def test_get_microscope_state(self, server) -> None:
         raw = server.gms_get_microscope_state()
         data = self._parse(raw)
@@ -214,6 +232,15 @@ class TestMCPServerTools:
         ht = data["optics"]["high_tension_kV"]
         assert ht is not None
         assert 60.0 <= ht <= 300.0
+
+    def test_get_front_image(self, server) -> None:
+        from gms_mcp.server import FrontImageInput
+
+        raw = server.gms_get_front_image(FrontImageInput(include_tags=True))
+        data = self._parse(raw)
+        assert data["success"] is True
+        assert data["image"]["shape"][0] > 0
+        assert "tags" in data["image"]
 
     def test_acquire_tem_default_params(self, server) -> None:
         from gms_mcp.server import AcquireTEMInput
@@ -309,6 +336,43 @@ class TestMCPServerTools:
         data = self._parse(raw)
         assert data["success"] is True
         assert data["pattern"]["camera_length_mm"] == pytest.approx(200.0)
+
+    def test_apply_image_filter(self, server) -> None:
+        from gms_mcp.server import ImageFilterInput
+
+        raw = server.gms_apply_image_filter(
+            ImageFilterInput(median_size=3, gaussian_sigma=1.0)
+        )
+        data = self._parse(raw)
+        assert data["success"] is True
+        assert data["image"]["shape"][0] > 0
+
+    def test_compute_radial_profile_fft(self, server) -> None:
+        from gms_mcp.server import AcquireTEMInput, RadialProfileInput
+
+        server.gms_acquire_tem_image(AcquireTEMInput())
+
+        raw = server.gms_compute_radial_profile(
+            RadialProfileInput(mode="fft", binning=2)
+        )
+        data = self._parse(raw)
+        assert data["success"] is True
+        assert data["analysis"]["mode"] == "fft"
+        assert data["analysis"]["profile_length"] > 0
+        assert len(data["profile"]) == data["analysis"]["profile_length"]
+
+    def test_compute_max_fft(self, server) -> None:
+        from gms_mcp.server import AcquireTEMInput, MaxFFTInput
+
+        server.gms_acquire_tem_image(AcquireTEMInput())
+
+        raw = server.gms_compute_max_fft(
+            MaxFFTInput(fft_size=64, spacing=32, log_scale=True)
+        )
+        data = self._parse(raw)
+        assert data["success"] is True
+        assert data["analysis"]["n_windows"] >= 1
+        assert data["image"]["shape"] == [64, 64]
 
     def test_get_stage_position(self, server) -> None:
         raw = server.gms_get_stage_position()
@@ -424,6 +488,11 @@ class TestMCPServerTools:
         assert data["analysis"]["type"] == "virtual_haadf"
 
     def test_4dstem_analysis_com(self, server) -> None:
+        from gms_mcp.server import Acquire4DSTEMInput
+
+        server.gms_acquire_4d_stem(
+            Acquire4DSTEMInput(scan_x=8, scan_y=8, dwell_us=500.0)
+        )
         raw = server.gms_run_4dstem_analysis(
             inner_angle_mrad=0.0,
             outer_angle_mrad=50.0,
@@ -431,6 +500,398 @@ class TestMCPServerTools:
         )
         data = self._parse(raw)
         assert data["success"] is True
+
+    def test_4dstem_maximum_spot_mapping(self, server) -> None:
+        from gms_mcp.server import Acquire4DSTEMInput, MaxSpotMapInput
+
+        server.gms_acquire_4d_stem(
+            Acquire4DSTEMInput(scan_x=8, scan_y=8, dwell_us=500.0)
+        )
+        raw = server.gms_run_4dstem_maximum_spot_mapping(
+            MaxSpotMapInput(mask_center_radius_px=3.0, map_var="theta")
+        )
+        data = self._parse(raw)
+        assert data["success"] is True
+        assert data["analysis"]["type"] == "maximum_spot_mapping"
+        assert data["image"]["shape"][2] == 3
+
+    def test_live_radial_profile_job(self, server) -> None:
+        from gms_mcp.server import AcquireTEMInput, LiveProcessingJobQuery, StartLiveProcessingJobInput
+
+        server.gms_acquire_tem_image(AcquireTEMInput())
+        start = self._parse(
+            server.gms_start_live_processing_job(
+                StartLiveProcessingJobInput(
+                    job_type="radial_profile",
+                    poll_interval_s=0.05,
+                    history_length=32,
+                    profile_mode="fft",
+                )
+            )
+        )
+        assert start["success"] is True
+        job_id = start["job"]["job_id"]
+        try:
+            status = self._wait_for_live_job(server, job_id, min_iterations=2)
+            assert status["job"]["status"] in {"running", "stopped"}
+            result = self._parse(
+                server.gms_get_live_processing_job_result(
+                    LiveProcessingJobQuery(job_id=job_id)
+                )
+            )
+            assert result["success"] is True
+            assert result["result"]["shape"][1] == 32
+        finally:
+            stop = self._parse(
+                server.gms_stop_live_processing_job(
+                    LiveProcessingJobQuery(job_id=job_id)
+                )
+            )
+            assert stop["success"] is True
+
+    def test_live_difference_job(self, server) -> None:
+        from gms_mcp.server import AcquireTEMInput, LiveProcessingJobQuery, StartLiveProcessingJobInput
+
+        server.gms_acquire_tem_image(AcquireTEMInput())
+        start = self._parse(
+            server.gms_start_live_processing_job(
+                StartLiveProcessingJobInput(
+                    job_type="difference",
+                    poll_interval_s=0.05,
+                    avg_period_1=3,
+                    avg_period_2=7,
+                    gaussian_sigma=1.0,
+                )
+            )
+        )
+        assert start["success"] is True
+        job_id = start["job"]["job_id"]
+        try:
+            status = self._wait_for_live_job(server, job_id, min_iterations=2)
+            assert status["job"]["result_summary"]["shape"][0] > 0
+            result = self._parse(
+                server.gms_get_live_processing_job_result(
+                    LiveProcessingJobQuery(job_id=job_id)
+                )
+            )
+            assert result["success"] is True
+            assert result["result"]["avg_period_1"] == 3
+        finally:
+            stop = self._parse(
+                server.gms_stop_live_processing_job(
+                    LiveProcessingJobQuery(job_id=job_id)
+                )
+            )
+            assert stop["success"] is True
+
+    def test_live_fft_map_job(self, server) -> None:
+        from gms_mcp.server import AcquireTEMInput, LiveProcessingJobQuery, StartLiveProcessingJobInput
+
+        server.gms_acquire_tem_image(AcquireTEMInput())
+        start = self._parse(
+            server.gms_start_live_processing_job(
+                StartLiveProcessingJobInput(
+                    job_type="fft_map",
+                    poll_interval_s=0.05,
+                    fft_size=64,
+                    spacing=32,
+                    log_scale=True,
+                )
+            )
+        )
+        assert start["success"] is True
+        job_id = start["job"]["job_id"]
+        try:
+            status = self._wait_for_live_job(server, job_id, min_iterations=1)
+            assert status["job"]["result_summary"]["shape"] == [64, 64]
+            result = self._parse(
+                server.gms_get_live_processing_job_result(
+                    LiveProcessingJobQuery(job_id=job_id)
+                )
+            )
+            assert result["success"] is True
+            assert result["result"]["fft_size"] == 64
+        finally:
+            stop = self._parse(
+                server.gms_stop_live_processing_job(
+                    LiveProcessingJobQuery(job_id=job_id)
+                )
+            )
+            assert stop["success"] is True
+
+    def test_live_filtered_view_job(self, server) -> None:
+        from gms_mcp.server import AcquireTEMInput, LiveProcessingJobQuery, StartLiveProcessingJobInput
+
+        server.gms_acquire_tem_image(AcquireTEMInput())
+        start = self._parse(
+            server.gms_start_live_processing_job(
+                StartLiveProcessingJobInput(
+                    job_type="filtered_view",
+                    poll_interval_s=0.05,
+                    median_size=3,
+                    gaussian_sigma=1.25,
+                )
+            )
+        )
+        assert start["success"] is True
+        job_id = start["job"]["job_id"]
+        try:
+            status = self._wait_for_live_job(server, job_id, min_iterations=1)
+            assert status["job"]["result_summary"]["shape"][0] > 0
+            result = self._parse(
+                server.gms_get_live_processing_job_result(
+                    LiveProcessingJobQuery(job_id=job_id)
+                )
+            )
+            assert result["success"] is True
+            assert result["result"]["median_size"] == 3
+            assert result["result"]["gaussian_sigma"] == pytest.approx(1.25)
+        finally:
+            stop = self._parse(
+                server.gms_stop_live_processing_job(
+                    LiveProcessingJobQuery(job_id=job_id)
+                )
+            )
+            assert stop["success"] is True
+
+    def test_live_maximum_spot_mapping_job(self, server) -> None:
+        from gms_mcp.server import Acquire4DSTEMInput, LiveProcessingJobQuery, StartLiveProcessingJobInput
+
+        server.gms_acquire_4d_stem(
+            Acquire4DSTEMInput(scan_x=8, scan_y=8, dwell_us=500.0)
+        )
+        start = self._parse(
+            server.gms_start_live_processing_job(
+                StartLiveProcessingJobInput(
+                    job_type="maximum_spot_mapping",
+                    poll_interval_s=0.05,
+                    mask_center_radius_px=3.0,
+                    map_var="theta",
+                )
+            )
+        )
+        assert start["success"] is True
+        job_id = start["job"]["job_id"]
+        try:
+            status = self._wait_for_live_job(server, job_id, min_iterations=1)
+            assert status["job"]["result_summary"]["shape"] == [8, 8, 3]
+            result = self._parse(
+                server.gms_get_live_processing_job_result(
+                    LiveProcessingJobQuery(job_id=job_id)
+                )
+            )
+            assert result["success"] is True
+            assert result["result"]["type"] == "maximum_spot_mapping"
+            assert result["result"]["map_var"] == "theta"
+        finally:
+            stop = self._parse(
+                server.gms_stop_live_processing_job(
+                    LiveProcessingJobQuery(job_id=job_id)
+                )
+            )
+            assert stop["success"] is True
+
+    def test_live_job_bridge_delegation(self, server, monkeypatch) -> None:
+        from gms_mcp.server import LiveProcessingJobQuery, StartLiveProcessingJobInput
+
+        calls: list[tuple[str, dict]] = []
+
+        def fake_bridge_dispatch(function_name: str, params: dict) -> dict:
+            calls.append((function_name, dict(params)))
+            if function_name == "LiveProcessingJobStart":
+                return {
+                    "success": True,
+                    "job": {
+                        "job_id": "bridge-job-1",
+                        "job_type": params["job_type"],
+                        "backend": "bridge",
+                        "status": "starting",
+                        "poll_interval_s": params["poll_interval_s"],
+                        "show_result": params["show_result"],
+                        "source_image_name": "Bridge Image",
+                    },
+                }
+            if function_name == "LiveProcessingJobStatus":
+                return {
+                    "success": True,
+                    "job": {
+                        "job_id": params["job_id"],
+                        "job_type": "filtered_view",
+                        "backend": "bridge",
+                        "status": "running",
+                        "poll_interval_s": 0.1,
+                        "iterations": 4,
+                        "created_at": 1.0,
+                        "last_updated": 2.0,
+                        "last_error": None,
+                        "source_image_name": "Bridge Image",
+                        "result_summary": {"shape": [512, 512]},
+                    },
+                }
+            if function_name == "LiveProcessingJobResult":
+                return {
+                    "success": True,
+                    "job": {
+                        "job_id": params["job_id"],
+                        "job_type": "filtered_view",
+                        "backend": "bridge",
+                        "status": "running",
+                        "poll_interval_s": 0.1,
+                        "iterations": 4,
+                        "created_at": 1.0,
+                        "last_updated": 2.0,
+                        "last_error": None,
+                        "source_image_name": "Bridge Image",
+                        "result_summary": {"shape": [512, 512]},
+                    },
+                    "result": {
+                        "shape": [512, 512],
+                        "median_size": 5,
+                        "gaussian_sigma": 1.0,
+                    },
+                }
+            return {
+                "success": True,
+                "job": {
+                    "job_id": params["job_id"],
+                    "job_type": "filtered_view",
+                    "backend": "bridge",
+                    "status": "stopped",
+                    "poll_interval_s": 0.1,
+                    "iterations": 4,
+                    "created_at": 1.0,
+                    "last_updated": 3.0,
+                    "last_error": None,
+                    "source_image_name": "Bridge Image",
+                    "result_summary": {"shape": [512, 512]},
+                },
+            }
+
+        monkeypatch.setattr(server, "_BRIDGE_ZMQ_ENDPOINT", "tcp://bridge-host:5555")
+        monkeypatch.setattr(server, "_bridge_dispatch", fake_bridge_dispatch)
+
+        start = self._parse(
+            server.gms_start_live_processing_job(
+                StartLiveProcessingJobInput(
+                    job_type="filtered_view",
+                    poll_interval_s=0.1,
+                    median_size=5,
+                    gaussian_sigma=1.0,
+                )
+            )
+        )
+        assert start["success"] is True
+        assert start["job"]["backend"] == "bridge"
+
+        status = self._parse(
+            server.gms_get_live_processing_job_status(
+                LiveProcessingJobQuery(job_id="bridge-job-1")
+            )
+        )
+        assert status["success"] is True
+        assert status["job"]["backend"] == "bridge"
+
+        result = self._parse(
+            server.gms_get_live_processing_job_result(
+                LiveProcessingJobQuery(job_id="bridge-job-1", include_data=True)
+            )
+        )
+        assert result["success"] is True
+        assert result["result"]["median_size"] == 5
+
+        stop = self._parse(
+            server.gms_stop_live_processing_job(
+                LiveProcessingJobQuery(job_id="bridge-job-1")
+            )
+        )
+        assert stop["success"] is True
+        assert [call[0] for call in calls] == [
+            "LiveProcessingJobStart",
+            "LiveProcessingJobStatus",
+            "LiveProcessingJobResult",
+            "LiveProcessingJobStop",
+        ]
+
+    def test_live_maximum_spot_mapping_bridge_delegation(self, server, monkeypatch) -> None:
+        from gms_mcp.server import LiveProcessingJobQuery, StartLiveProcessingJobInput
+
+        calls: list[tuple[str, dict]] = []
+
+        def fake_bridge_dispatch(function_name: str, params: dict) -> dict:
+            calls.append((function_name, dict(params)))
+            base_job = {
+                "job_id": "bridge-4dstem-job",
+                "job_type": "maximum_spot_mapping",
+                "backend": "bridge",
+                "poll_interval_s": 0.1,
+                "iterations": 2,
+                "created_at": 1.0,
+                "last_updated": 2.0,
+                "last_error": None,
+                "source_image_name": "4DSTEM_Bridge",
+                "result_summary": {"shape": [8, 8, 3], "type": "maximum_spot_mapping"},
+            }
+            if function_name == "LiveProcessingJobStart":
+                return {"success": True, "job": {**base_job, "status": "starting", "show_result": params["show_result"]}}
+            if function_name == "LiveProcessingJobStatus":
+                return {"success": True, "job": {**base_job, "status": "running"}}
+            if function_name == "LiveProcessingJobResult":
+                return {
+                    "success": True,
+                    "job": {**base_job, "status": "running"},
+                    "result": {
+                        "shape": [8, 8, 3],
+                        "type": "maximum_spot_mapping",
+                        "map_var": "radius",
+                    },
+                }
+            return {"success": True, "job": {**base_job, "status": "stopped"}}
+
+        monkeypatch.setattr(server, "_BRIDGE_ZMQ_ENDPOINT", "tcp://bridge-host:5555")
+        monkeypatch.setattr(server, "_bridge_dispatch", fake_bridge_dispatch)
+
+        start = self._parse(
+            server.gms_start_live_processing_job(
+                StartLiveProcessingJobInput(
+                    job_type="maximum_spot_mapping",
+                    poll_interval_s=0.1,
+                    map_var="radius",
+                    mask_center_radius_px=4.0,
+                )
+            )
+        )
+        assert start["success"] is True
+        assert start["job"]["backend"] == "bridge"
+
+        status = self._parse(
+            server.gms_get_live_processing_job_status(
+                LiveProcessingJobQuery(job_id="bridge-4dstem-job")
+            )
+        )
+        assert status["success"] is True
+        assert status["job"]["job_type"] == "maximum_spot_mapping"
+
+        result = self._parse(
+            server.gms_get_live_processing_job_result(
+                LiveProcessingJobQuery(job_id="bridge-4dstem-job")
+            )
+        )
+        assert result["success"] is True
+        assert result["result"]["type"] == "maximum_spot_mapping"
+        assert result["result"]["map_var"] == "radius"
+
+        stop = self._parse(
+            server.gms_stop_live_processing_job(
+                LiveProcessingJobQuery(job_id="bridge-4dstem-job")
+            )
+        )
+        assert stop["success"] is True
+        assert [call[0] for call in calls] == [
+            "LiveProcessingJobStart",
+            "LiveProcessingJobStatus",
+            "LiveProcessingJobResult",
+            "LiveProcessingJobStop",
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -472,17 +933,26 @@ class TestServerTransport:
         tool_names = {t.name for t in tools}
         expected = {
             "gms_get_microscope_state",
+            "gms_get_front_image",
             "gms_acquire_tem_image",
             "gms_acquire_stem",
             "gms_acquire_4d_stem",
             "gms_acquire_eels",
             "gms_acquire_diffraction",
+            "gms_apply_image_filter",
+            "gms_compute_radial_profile",
+            "gms_compute_max_fft",
+            "gms_start_live_processing_job",
+            "gms_get_live_processing_job_status",
+            "gms_get_live_processing_job_result",
+            "gms_stop_live_processing_job",
             "gms_get_stage_position",
             "gms_set_stage_position",
             "gms_set_beam_parameters",
             "gms_configure_detectors",
             "gms_acquire_tilt_series",
             "gms_run_4dstem_analysis",
+            "gms_run_4dstem_maximum_spot_mapping",
         }
         missing = expected - tool_names
         assert not missing, f"Missing tools: {missing}"
