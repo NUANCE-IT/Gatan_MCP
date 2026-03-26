@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nuance-gms-mcp"
-version = "0.1.0"
+version = "0.1.1"
 description = "Model Context Protocol server for Gatan Microscopy Suite 3.60 — multimodal TEM/STEM/EELS/4D-STEM control via local LLMs"
 readme = "README.md"
 license = { text = "MIT" }
