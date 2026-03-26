@@ -50,6 +50,13 @@ In the GMS Python console (Script → Open Python Console):
 exec(open("C:/GMS_Scripts/dm_plugin.py").read())
 ```
 
+Or, if `nuance-gms-mcp` is installed directly inside `GMS_VENV_PYTHON`:
+
+```python
+from gms_mcp.dm_plugin import start_bridge
+start_bridge()
+```
+
 You should see:
 
 ```
@@ -147,13 +154,22 @@ GMS_MCP_ZMQ=tcp://127.0.0.1:5555 python -m gms_mcp.client
 
 **GMS freezes when running the bridge**
 
-The bridge uses `DM.DoEvents()` inside the polling loop to keep GMS
-responsive. If the UI still freezes, increase the ZMQ timeout:
+Use the current bridge implementation and start it with either:
 
 ```python
-# In dm_plugin.py, increase RCVTIMEO (in ms):
-_zmq_socket.setsockopt(zmq.RCVTIMEO, 1000)
+exec(open("C:/GMS_Scripts/dm_plugin.py").read())
 ```
+
+or:
+
+```python
+from gms_mcp.dm_plugin import start_bridge
+start_bridge()
+```
+
+Do not rely on module import side effects to start the bridge.
+If GMS still freezes on startup, verify that you are using the latest
+published package or current `dm_plugin.py` from the repository.
 
 **Stage doesn't move**
 

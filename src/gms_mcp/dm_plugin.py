@@ -871,25 +871,49 @@ _zmq_context: zmq.Context | None = None
 _zmq_socket: zmq.Socket | None   = None
 _bridge_thread: threading.Thread | None = None
 _running = threading.Event()
+_bridge_ready = threading.Event()
+_bridge_error: str | None = None
+_bridge_state_lock = threading.Lock()
+
+
+def _set_bridge_error(message: str | None) -> None:
+    global _bridge_error
+    with _bridge_state_lock:
+        _bridge_error = message
+
+
+def _get_bridge_error() -> str | None:
+    with _bridge_state_lock:
+        return _bridge_error
 
 
 def _bridge_loop() -> None:
     """Main ZeroMQ REP loop — runs in a daemon thread."""
     global _zmq_context, _zmq_socket
 
-    _zmq_context = zmq.Context()
-    _zmq_socket  = _zmq_context.socket(zmq.REP)
-    _zmq_socket.bind(ZMQ_BIND)
-    _zmq_socket.setsockopt(zmq.RCVTIMEO, 500)   # 500 ms poll timeout
+    try:
+        _zmq_context = zmq.Context()
+        _zmq_socket = _zmq_context.socket(zmq.REP)
+        _zmq_socket.setsockopt(zmq.RCVTIMEO, 500)   # 500 ms poll timeout
+        _zmq_socket.bind(ZMQ_BIND)
+    except Exception as exc:
+        _set_bridge_error(str(exc))
+        _running.clear()
+        _bridge_ready.set()
+        if _zmq_socket is not None:
+            _zmq_socket.close(linger=0)
+            _zmq_socket = None
+        if _zmq_context is not None:
+            _zmq_context.term()
+            _zmq_context = None
+        return
 
-    DM.Result(f"[GMS-MCP] DM bridge ready on {ZMQ_BIND}\n")
+    _bridge_ready.set()
 
     while _running.is_set():
         try:
             msg_bytes = _zmq_socket.recv()
         except zmq.Again:
-            # Timeout — check _running flag and loop
-            DM.DoEvents()
             continue
         except zmq.ZMQError:
             break
@@ -906,11 +930,12 @@ def _bridge_loop() -> None:
         except zmq.ZMQError:
             break
 
-        DM.DoEvents()   # keep GMS UI responsive during long acquisitions
-
-    _zmq_socket.close()
-    _zmq_context.term()
-    DM.Result("[GMS-MCP] DM bridge stopped.\n")
+    if _zmq_socket is not None:
+        _zmq_socket.close(linger=0)
+        _zmq_socket = None
+    if _zmq_context is not None:
+        _zmq_context.term()
+        _zmq_context = None
 
 
 def start_bridge(bind: str = ZMQ_BIND) -> None:
@@ -922,9 +947,23 @@ def start_bridge(bind: str = ZMQ_BIND) -> None:
         return
 
     ZMQ_BIND = bind
+    _set_bridge_error(None)
+    _bridge_ready.clear()
     _running.set()
     _bridge_thread = threading.Thread(target=_bridge_loop, daemon=True, name="gms-mcp-bridge")
     _bridge_thread.start()
+
+    if not _bridge_ready.wait(timeout=2.0):
+        DM.Result(f"[GMS-MCP] Bridge thread started → {bind}\n")
+        DM.Result("[GMS-MCP] Waiting for ZeroMQ socket bind confirmation...\n")
+        return
+
+    error = _get_bridge_error()
+    if error:
+        DM.Result(f"[GMS-MCP] Failed to start bridge on {bind}: {error}\n")
+        return
+
+    DM.Result(f"[GMS-MCP] DM bridge ready on {bind}\n")
     DM.Result(f"[GMS-MCP] Bridge thread started → {bind}\n")
 
 
@@ -940,5 +979,5 @@ def stop_bridge() -> None:
 # Auto-start when exec()'d inside GMS
 # ---------------------------------------------------------------------------
 
-if __name__ == "__main__" or "DigitalMicrograph" in sys.modules:
+if __name__ == "__main__":
     start_bridge()

@@ -66,6 +66,13 @@ exec(open("C:/GMS_Scripts/dm_plugin.py").read())
 # Output: [GMS-MCP] DM bridge ready on tcp://0.0.0.0:5555
 ```
 
+If `nuance-gms-mcp` is already installed inside `GMS_VENV_PYTHON`, you can also run:
+
+```python
+from gms_mcp.dm_plugin import start_bridge
+start_bridge()
+```
+
 ### Step 3: Install GMS-MCP on your workstation
 
 ```bash
