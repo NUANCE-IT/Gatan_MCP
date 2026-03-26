@@ -523,11 +523,11 @@ def _run_live_processing_job(job_id: str) -> None:
                 raise ValueError(f"Unsupported live-processing job type: {job_type}")
 
             result_data = np.asarray(result["data"], dtype=np.float32)
+            job["status"] = "running"
             job["latest_result"] = result
             job["iterations"] = int(job.get("iterations", 0)) + 1
             job["last_updated"] = time.time()
             job["last_error"] = None
-            job["status"] = "running"
 
             if bool(params.get("show_result", False)):
                 result_image = job.get("result_image")

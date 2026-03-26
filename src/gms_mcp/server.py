@@ -1077,12 +1077,12 @@ def _run_live_processing_job(job_id: str) -> None:
 
             result_data = result["data"]
             assert isinstance(result_data, np.ndarray)
+            job["status"] = "running"
             job["latest_result"] = result
             iterations = job.get("iterations", 0)
             job["iterations"] = int(iterations) + 1 if isinstance(iterations, (int, float, str)) else 1
             job["last_updated"] = time.time()
             job["last_error"] = None
-            job["status"] = "running"
 
             if params.show_result:
                 result_image = job.get("result_image")
