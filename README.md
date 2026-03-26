@@ -19,6 +19,7 @@ GMS-MCP connects **Gatan Microscopy Suite (GMS) 3.60** to any MCP-compatible LLM
 |---|---|
 | Instrument API | Gatan DigitalMicrograph / GMS 3.60 |
 | LLM backend | Local Ollama (air-gap compatible) |
+| Voice control | Optional local push-to-talk + Whisper transcription |
 | Data handling | On-site, local-first workflow |
 | Modalities | TEM / HRTEM, STEM (HAADF/BF/ABF), 4D-STEM / NBED, EELS, diffraction |
 | Built-in analysis | Virtual BF/HAADF, CoM, DPC, radial profiles, max-FFT, filtering, maximum-spot mapping |
@@ -60,6 +61,9 @@ pip install gms-mcp
 # With Ollama client support
 pip install "gms-mcp[ollama]"
 
+# With local voice control (microphone + Whisper transcription)
+pip install "gms-mcp[ollama,voice]"
+
 # With ZeroMQ bridge for live GMS connection
 pip install "gms-mcp[ollama,zmq]"
 
@@ -94,6 +98,23 @@ GMS_SIMULATE=1 python -m gms_mcp.client \
   --query "Acquire a 512×512 HAADF STEM image at 10 µs dwell time" \
   --no-interactive --verbose
 ```
+
+### 3b. Run with local voice control
+
+```bash
+# Push-to-talk microphone input with local faster-whisper transcription
+GMS_SIMULATE=1 python -m gms_mcp.client --voice
+
+# Voice input plus spoken replies on macOS (uses the built-in 'say' command)
+GMS_SIMULATE=1 python -m gms_mcp.client --voice --speak
+
+# One-shot voice command, then exit
+GMS_SIMULATE=1 python -m gms_mcp.client --voice --no-interactive
+```
+
+Voice mode records locally, transcribes locally with Whisper, and sends the
+resulting text transcript through the same Ollama → MCP tool-calling path as
+typed instructions.
 
 ### 4. Connect to a live GMS instance
 

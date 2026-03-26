@@ -10,7 +10,7 @@ Architecture
         ↕  LangChain / langgraph ReAct agent
     MultiServerMCPClient (langchain-mcp-adapters)
         ↕  stdio subprocess OR HTTP
-    gms_mcp_server.py  (FastMCP, simulation or live)
+    gms_mcp.server  (FastMCP, simulation or live)
         ↕  DM Python API (inside GMS) or DMSimulator
 
 Quick start
@@ -51,6 +51,8 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_ollama import ChatOllama
 from langgraph.prebuilt import create_react_agent
+
+from gms_mcp import voice as voice_io
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -130,6 +132,33 @@ def _build_llm(model: str, base_url: str, temperature: float = 0.0) -> ChatOllam
         num_ctx=8192,           # 8k context — enough for multi-tool chains
         num_predict=2048,       # max tokens per response
     )
+
+
+def _capture_voice_query(
+    transcriber: voice_io.LocalWhisperTranscriber,
+    sample_rate: int,
+    max_duration_s: float,
+) -> str:
+    audio_path = voice_io.record_push_to_talk(
+        sample_rate=sample_rate,
+        max_duration_s=max_duration_s,
+    )
+    try:
+        transcript = transcriber.transcribe_file(audio_path)
+    finally:
+        voice_io.remove_temp_audio_file(audio_path)
+    print(f"\nYou (transcribed): {transcript}\n")
+    return transcript
+
+
+def _emit_agent_reply(answer: str, speak: bool = False, tts_command: str = "") -> None:
+    print(f"\nAgent: {answer}\n")
+    if not speak:
+        return
+    try:
+        voice_io.speak_text(answer, command=tts_command)
+    except Exception as exc:
+        print(f"[voice] Speech output unavailable: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +246,14 @@ async def interactive_session(
     model: str = DEFAULT_MODEL,
     base_url: str = DEFAULT_OLLAMA_URL,
     server_url: str = DEFAULT_GMS_MCP_URL,
+    voice_mode: bool = False,
+    speak: bool = False,
+    tts_command: str = "",
+    whisper_model: str = voice_io.DEFAULT_WHISPER_MODEL,
+    whisper_device: str = voice_io.DEFAULT_WHISPER_DEVICE,
+    whisper_language: str = voice_io.DEFAULT_WHISPER_LANGUAGE,
+    voice_sample_rate: int = voice_io.DEFAULT_SAMPLE_RATE,
+    voice_max_seconds: float = voice_io.DEFAULT_MAX_RECORDING_S,
 ) -> None:
     """
     Launch an interactive REPL for conversational microscope control.
@@ -235,20 +272,45 @@ async def interactive_session(
         tools,
         prompt=SYSTEM_PROMPT,
     )
+    transcriber = None
+    if voice_mode:
+        transcriber = voice_io.LocalWhisperTranscriber(
+            model_name=whisper_model,
+            device=whisper_device,
+            language=whisper_language,
+        )
 
     print("\n" + "=" * 64)
     print("  GMS Microscope Agent  (Ollama ×  MCP)")
     print(f"  Model   : {model}")
     print(f"  Server  : {'HTTP → ' + server_url if server_url else 'stdio subprocess'}")
     print(f"  Tools   : {len(tools)} available")
+    print(f"  Input   : {'voice push-to-talk' if voice_mode else 'text'}")
     print("=" * 64)
-    print("Type your instruction. 'exit' or Ctrl-C to quit.\n")
+    if voice_mode:
+        print("Press Enter to start and stop recording. Say 'exit' to quit.\n")
+    else:
+        print("Type your instruction. 'exit' or Ctrl-C to quit.\n")
 
     history = []
 
     while True:
         try:
-            user_input = input("You: ").strip()
+            if voice_mode:
+                assert transcriber is not None
+                user_input = _capture_voice_query(
+                    transcriber=transcriber,
+                    sample_rate=voice_sample_rate,
+                    max_duration_s=voice_max_seconds,
+                ).strip()
+            else:
+                user_input = input("You: ").strip()
+        except voice_io.VoiceDependencyError as exc:
+            print(f"[ERROR] Voice mode is unavailable: {exc}\n")
+            break
+        except RuntimeError as exc:
+            print(f"[ERROR] Voice capture failed: {exc}\n")
+            continue
         except (EOFError, KeyboardInterrupt):
             print("\n[Session ended]")
             break
@@ -274,7 +336,7 @@ async def interactive_session(
         for msg in reversed(result["messages"]):
             if (isinstance(msg, AIMessage) and msg.content
                     and not getattr(msg, "tool_calls", [])):
-                print(f"\nAgent: {msg.content}\n")
+                _emit_agent_reply(str(msg.content), speak=speak, tts_command=tts_command)
                 break
 
 
@@ -282,7 +344,7 @@ async def interactive_session(
 # CLI entrypoint
 # ---------------------------------------------------------------------------
 
-def _parse_args() -> argparse.Namespace:
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="GMS Ollama MCP Client — natural-language microscope control"
     )
@@ -300,28 +362,90 @@ def _parse_args() -> argparse.Namespace:
                    help="Print tool calls and intermediate steps")
     p.add_argument("--output-json", action="store_true",
                    help="Print final result as JSON (for scripting)")
-    return p.parse_args()
+    p.add_argument("--voice", action="store_true",
+                   help="Use push-to-talk microphone capture instead of typed input")
+    p.add_argument("--speak", action="store_true",
+                   help="Speak the agent reply using a local TTS command")
+    p.add_argument("--tts-command", default="",
+                   help="Override the local TTS command (default: auto-detect, e.g. 'say')")
+    p.add_argument("--whisper-model", default=voice_io.DEFAULT_WHISPER_MODEL,
+                   help=(
+                       "Local faster-whisper model name for voice transcription "
+                       f"(default: {voice_io.DEFAULT_WHISPER_MODEL})"
+                   ))
+    p.add_argument("--whisper-device", default=voice_io.DEFAULT_WHISPER_DEVICE,
+                   help=(
+                       "Device passed to faster-whisper "
+                       f"(default: {voice_io.DEFAULT_WHISPER_DEVICE})"
+                   ))
+    p.add_argument("--whisper-language", default=voice_io.DEFAULT_WHISPER_LANGUAGE,
+                   help=(
+                       "Language hint for faster-whisper "
+                       f"(default: {voice_io.DEFAULT_WHISPER_LANGUAGE})"
+                   ))
+    p.add_argument("--voice-sample-rate", type=int, default=voice_io.DEFAULT_SAMPLE_RATE,
+                   help=f"Microphone sample rate in Hz (default: {voice_io.DEFAULT_SAMPLE_RATE})")
+    p.add_argument("--voice-max-seconds", type=float,
+                   default=voice_io.DEFAULT_MAX_RECORDING_S,
+                   help=(
+                       "Maximum duration for a push-to-talk utterance in seconds "
+                       f"(default: {voice_io.DEFAULT_MAX_RECORDING_S})"
+                   ))
+    return p.parse_args(argv)
+
+
+def _print_run_result(
+    result: dict,
+    verbose: bool = False,
+    output_json: bool = False,
+    speak: bool = False,
+    tts_command: str = "",
+) -> None:
+    if output_json:
+        print(json.dumps(result, indent=2))
+        return
+
+    _emit_agent_reply(str(result.get("answer", "")), speak=speak, tts_command=tts_command)
+    if verbose:
+        print(f"Tool calls: {len(result['tool_calls'])}")
+        for tc in result["tool_calls"]:
+            print(f"  → {tc['tool']}")
 
 
 async def _main() -> None:
     args = _parse_args()
 
-    if args.query:
+    query = args.query
+    if args.voice and not query and args.no_interactive:
+        try:
+            transcriber = voice_io.LocalWhisperTranscriber(
+                model_name=args.whisper_model,
+                device=args.whisper_device,
+                language=args.whisper_language,
+            )
+            query = _capture_voice_query(
+                transcriber=transcriber,
+                sample_rate=args.voice_sample_rate,
+                max_duration_s=args.voice_max_seconds,
+            )
+        except voice_io.VoiceDependencyError as exc:
+            raise SystemExit(f"Voice mode is unavailable: {exc}") from exc
+
+    if query:
         result = await run_agent(
-            query=args.query,
+            query=query,
             model=args.model,
             base_url=args.ollama_url,
             server_url=args.gms_url,
             verbose=args.verbose,
         )
-        if args.output_json:
-            print(json.dumps(result, indent=2))
-        else:
-            print(f"\nAnswer: {result['answer']}")
-            if args.verbose:
-                print(f"\nTool calls: {len(result['tool_calls'])}")
-                for tc in result["tool_calls"]:
-                    print(f"  → {tc['tool']}")
+        _print_run_result(
+            result,
+            verbose=args.verbose,
+            output_json=args.output_json,
+            speak=args.speak,
+            tts_command=args.tts_command,
+        )
 
         if args.no_interactive:
             return
@@ -330,8 +454,20 @@ async def _main() -> None:
         model=args.model,
         base_url=args.ollama_url,
         server_url=args.gms_url,
+        voice_mode=args.voice,
+        speak=args.speak,
+        tts_command=args.tts_command,
+        whisper_model=args.whisper_model,
+        whisper_device=args.whisper_device,
+        whisper_language=args.whisper_language,
+        voice_sample_rate=args.voice_sample_rate,
+        voice_max_seconds=args.voice_max_seconds,
     )
 
 
-if __name__ == "__main__":
+def main() -> None:
     asyncio.run(_main())
+
+
+if __name__ == "__main__":
+    main()

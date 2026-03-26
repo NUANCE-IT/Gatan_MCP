@@ -973,6 +973,71 @@ class TestServerTransport:
             )
 
 
+class TestClientVoiceHelpers:
+    def test_parse_args_voice_flags(self) -> None:
+        from gms_mcp.client import _parse_args
+
+        args = _parse_args([
+            "--voice",
+            "--speak",
+            "--whisper-model",
+            "small.en",
+            "--voice-max-seconds",
+            "12",
+        ])
+
+        assert args.voice is True
+        assert args.speak is True
+        assert args.whisper_model == "small.en"
+        assert args.voice_max_seconds == pytest.approx(12.0)
+
+    def test_capture_voice_query_transcribes_and_cleans_up(self, monkeypatch) -> None:
+        from gms_mcp import client
+
+        removed = []
+
+        class DummyTranscriber:
+            def transcribe_file(self, audio_path) -> str:
+                assert str(audio_path).endswith(".wav")
+                return "Acquire a 256 by 256 TEM image"
+
+        monkeypatch.setattr(
+            client.voice_io,
+            "record_push_to_talk",
+            lambda sample_rate, max_duration_s: Path("/tmp/fake_prompt.wav"),
+        )
+        monkeypatch.setattr(
+            client.voice_io,
+            "remove_temp_audio_file",
+            lambda audio_path: removed.append(Path(audio_path)),
+        )
+
+        transcript = client._capture_voice_query(
+            transcriber=DummyTranscriber(),
+            sample_rate=16_000,
+            max_duration_s=10.0,
+        )
+
+        assert transcript == "Acquire a 256 by 256 TEM image"
+        assert removed == [Path("/tmp/fake_prompt.wav")]
+
+    def test_emit_agent_reply_speaks_when_enabled(self, monkeypatch, capsys) -> None:
+        from gms_mcp import client
+
+        spoken = []
+        monkeypatch.setattr(
+            client.voice_io,
+            "speak_text",
+            lambda text, command="": spoken.append((text, command)),
+        )
+
+        client._emit_agent_reply("Stage moved successfully.", speak=True, tts_command="say")
+
+        out = capsys.readouterr().out
+        assert "Agent: Stage moved successfully." in out
+        assert spoken == [("Stage moved successfully.", "say")]
+
+
 # ---------------------------------------------------------------------------
 # TestOllamaIntegration — end-to-end tests (requires Ollama)
 # ---------------------------------------------------------------------------

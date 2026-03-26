@@ -7,6 +7,7 @@
 | Python | 3.10 | 3.12 |
 | RAM | 8 GB | 16 GB |
 | GPU (for Ollama) | None (CPU OK) | NVIDIA RTX 3080+ |
+| Microphone (voice mode) | Optional | USB headset or workstation mic |
 | GMS version | 3.60 | 3.62 |
 | OS | Windows 10 | Windows 11 |
 
@@ -80,6 +81,30 @@ ngrok http 8000
 
 Then in Claude.ai → **Settings → Connectors → Add custom connector**
 and enter the HTTPS URL shown by ngrok.
+
+---
+
+## Scenario D — Local voice control
+
+Voice mode adds push-to-talk microphone capture, local faster-whisper transcription,
+and optional spoken replies while keeping the existing Ollama MCP workflow unchanged.
+
+```bash
+pip install "gms-mcp[ollama,voice]"
+
+# Start the voice-enabled interactive agent
+GMS_SIMULATE=1 python -m gms_mcp.client --voice
+
+# Add spoken replies on macOS (uses 'say' automatically)
+GMS_SIMULATE=1 python -m gms_mcp.client --voice --speak
+```
+
+Notes:
+
+- `sounddevice` is used for microphone capture.
+- `faster-whisper` is used for local transcription.
+- On macOS, spoken replies use the built-in `say` command.
+- The transcribed text is passed into the same MCP client path used by typed input.
 
 ---
 
