@@ -9,7 +9,7 @@ description = "Model Context Protocol server for Gatan Microscopy Suite 3.60 —
 readme = "README.md"
 license = { text = "MIT" }
 authors = [
-    { name = "Roberto dos Reis",    email = "roberto.dosreis@northwestern.edu" },
+    { name = "Roberto dos Reis",    email = "roberto.reis@northwestern.edu" },
     { name = "Vinayak P. Dravid",   email = "v-dravid@northwestern.edu"        },
 ]
 keywords = [

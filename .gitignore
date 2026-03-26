@@ -10,6 +10,7 @@ dist/
 # Virtual environments
 .venv/
 venv/
+.ci-venv*/
 
 # Tool caches
 .pytest_cache/
