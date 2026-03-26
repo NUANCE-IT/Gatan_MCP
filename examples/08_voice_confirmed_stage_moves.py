@@ -12,6 +12,11 @@ Run:
     pip install "gms-mcp[ollama,voice]"
     GMS_SIMULATE=1 python examples/08_voice_confirmed_stage_moves.py
     GMS_SIMULATE=1 python examples/08_voice_confirmed_stage_moves.py --speak
+
+Manual simulator smoke test (no microphone capture):
+    GMS_SIMULATE=1 python examples/08_voice_confirmed_stage_moves.py \
+      --transcript "Move the stage to x equals 100 micrometers, y equals minus 50 micrometers, then tilt alpha to minus 20 degrees." \
+      --confirm-transcript "confirm move"
 """
 
 from __future__ import annotations
@@ -73,6 +78,16 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--whisper-language", default=DEFAULT_WHISPER_LANGUAGE)
     parser.add_argument("--voice-sample-rate", type=int, default=DEFAULT_SAMPLE_RATE)
     parser.add_argument("--voice-max-seconds", type=float, default=DEFAULT_MAX_RECORDING_S)
+    parser.add_argument(
+        "--transcript",
+        default="",
+        help="Use this text instead of recording the primary voice command",
+    )
+    parser.add_argument(
+        "--confirm-transcript",
+        default="",
+        help="Use this text instead of recording the confirmation phrase",
+    )
     return parser.parse_args()
 
 
@@ -104,35 +119,53 @@ def _confirmed(transcript: str) -> bool:
 async def main() -> None:
     args = _parse_args()
 
-    print("\nPress Enter to start recording your microscope instruction, then press Enter again to stop.")
-    print("Example prompt: 'Move the stage to x equals 100 micrometers, y equals minus 50 micrometers, then tilt alpha to minus 20 degrees.'\n")
+    transcriber = None
+    if args.transcript:
+        transcript = args.transcript
+        print("\nUsing injected primary transcript for simulator smoke test.\n")
+    else:
+        print("\nPress Enter to start recording your microscope instruction, then press Enter again to stop.")
+        print("Example prompt: 'Move the stage to x equals 100 micrometers, y equals minus 50 micrometers, then tilt alpha to minus 20 degrees.'\n")
 
-    try:
-        transcriber = LocalWhisperTranscriber(
-            model_name=args.whisper_model,
-            device=args.whisper_device,
-            language=args.whisper_language,
-        )
+        try:
+            transcriber = LocalWhisperTranscriber(
+                model_name=args.whisper_model,
+                device=args.whisper_device,
+                language=args.whisper_language,
+            )
 
-        transcript = _record_transcript(
-            transcriber=transcriber,
-            sample_rate=args.voice_sample_rate,
-            max_duration_s=args.voice_max_seconds,
-        )
-    except VoiceDependencyError as exc:
-        raise SystemExit(f"Voice dependencies are unavailable: {exc}") from exc
+            transcript = _record_transcript(
+                transcriber=transcriber,
+                sample_rate=args.voice_sample_rate,
+                max_duration_s=args.voice_max_seconds,
+            )
+        except VoiceDependencyError as exc:
+            raise SystemExit(f"Voice dependencies are unavailable: {exc}") from exc
 
     print("\n─── Requested Action ───")
     print(transcript)
 
     if _requires_confirmation(transcript):
         print("\nThis request includes a stage move or tilt. A second confirmation is required before it will be sent to the agent.")
-        print("Press Enter to record a confirmation phrase such as 'confirm move', 'yes proceed', or 'cancel'.\n")
-        confirmation = _record_transcript(
-            transcriber=transcriber,
-            sample_rate=args.voice_sample_rate,
-            max_duration_s=args.voice_max_seconds,
-        )
+        if args.confirm_transcript:
+            confirmation = args.confirm_transcript
+            print("Using injected confirmation transcript for simulator smoke test.\n")
+        else:
+            if transcriber is None:
+                try:
+                    transcriber = LocalWhisperTranscriber(
+                        model_name=args.whisper_model,
+                        device=args.whisper_device,
+                        language=args.whisper_language,
+                    )
+                except VoiceDependencyError as exc:
+                    raise SystemExit(f"Voice dependencies are unavailable: {exc}") from exc
+            print("Press Enter to record a confirmation phrase such as 'confirm move', 'yes proceed', or 'cancel'.\n")
+            confirmation = _record_transcript(
+                transcriber=transcriber,
+                sample_rate=args.voice_sample_rate,
+                max_duration_s=args.voice_max_seconds,
+            )
         print("\n─── Confirmation Transcript ───")
         print(confirmation)
         if not _confirmed(confirmation):

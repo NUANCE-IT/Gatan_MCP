@@ -395,6 +395,14 @@ class TestMCPServerTools:
         assert data["success"] is True
         assert data["new_position"]["alpha_deg"] == pytest.approx(-30.0)
 
+    def test_set_stage_flattened_kwargs(self, server) -> None:
+        raw = server.gms_set_stage_position(x_um=100.0, y_um=-50.0, alpha_deg=-20.0)
+        data = self._parse(raw)
+        assert data["success"] is True
+        assert data["new_position"]["x_um"] == pytest.approx(100.0)
+        assert data["new_position"]["y_um"] == pytest.approx(-50.0)
+        assert data["new_position"]["alpha_deg"] == pytest.approx(-20.0)
+
     def test_set_stage_no_axes_error(self, server) -> None:
         from gms_mcp.server import SetStageInput
         raw = server.gms_set_stage_position(SetStageInput())

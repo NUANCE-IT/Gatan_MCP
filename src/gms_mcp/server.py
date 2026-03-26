@@ -2126,7 +2126,14 @@ def gms_get_stage_position() -> str:
     annotations={"readOnlyHint": False, "destructiveHint": False,
                  "idempotentHint": True, "openWorldHint": False},
 )
-def gms_set_stage_position(params: SetStageInput) -> str:
+def gms_set_stage_position(
+    params: Optional[SetStageInput] = None,
+    x_um: Optional[float] = None,
+    y_um: Optional[float] = None,
+    z_um: Optional[float] = None,
+    alpha_deg: Optional[float] = None,
+    beta_deg: Optional[float] = None,
+) -> str:
     """
     Move the microscope stage to specified coordinates.
 
@@ -2140,9 +2147,27 @@ def gms_set_stage_position(params: SetStageInput) -> str:
         params.alpha_deg (float) : Alpha tilt (±80°).
         params.beta_deg  (float) : Beta tilt (±30°).
 
+    The same fields can also be passed directly as top-level kwargs
+    (e.g. `x_um=100`) for compatibility with some LLM tool clients.
+
     Returns JSON with new stage position after movement.
     """
     try:
+        direct_kwargs: dict[str, object] = {
+            "x_um": x_um,
+            "y_um": y_um,
+            "z_um": z_um,
+            "alpha_deg": alpha_deg,
+            "beta_deg": beta_deg,
+        }
+
+        if params is None:
+            params = SetStageInput(**{k: v for k, v in direct_kwargs.items() if v is not None})
+        elif any(v is not None for v in direct_kwargs.values()):
+            merged = params.model_dump(exclude_none=True)
+            merged.update({k: v for k, v in direct_kwargs.items() if v is not None})
+            params = SetStageInput(**merged)
+
         flags = 0
         args = [0.0, 0.0, 0.0, 0.0, 0.0]
         if params.x_um is not None:     flags |= 1;  args[0] = params.x_um

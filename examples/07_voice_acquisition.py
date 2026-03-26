@@ -11,6 +11,10 @@ Run:
     pip install "gms-mcp[ollama,voice]"
     GMS_SIMULATE=1 python examples/07_voice_acquisition.py
     GMS_SIMULATE=1 python examples/07_voice_acquisition.py --speak
+
+Manual simulator smoke test (no microphone capture):
+    GMS_SIMULATE=1 python examples/07_voice_acquisition.py \
+      --transcript "Check microscope state, acquire a 256 by 256 HAADF STEM image at 5 microseconds dwell time, and report the mean intensity."
 """
 
 from __future__ import annotations
@@ -54,31 +58,40 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--whisper-language", default=DEFAULT_WHISPER_LANGUAGE)
     parser.add_argument("--voice-sample-rate", type=int, default=DEFAULT_SAMPLE_RATE)
     parser.add_argument("--voice-max-seconds", type=float, default=DEFAULT_MAX_RECORDING_S)
+    parser.add_argument(
+        "--transcript",
+        default="",
+        help="Use this text instead of recording audio (useful for simulator smoke tests)",
+    )
     return parser.parse_args()
 
 
 async def main() -> None:
     args = _parse_args()
 
-    print("\nPress Enter to start recording, describe the acquisition workflow, then press Enter again to stop.")
-    print("Example prompt: 'Check microscope state, acquire a 512 by 512 HAADF STEM image at 10 microseconds dwell time, and report the mean intensity.'\n")
+    if args.transcript:
+        transcript = args.transcript
+        print("\nUsing injected transcript for simulator smoke test.\n")
+    else:
+        print("\nPress Enter to start recording, describe the acquisition workflow, then press Enter again to stop.")
+        print("Example prompt: 'Check microscope state, acquire a 512 by 512 HAADF STEM image at 10 microseconds dwell time, and report the mean intensity.'\n")
 
-    try:
-        transcriber = LocalWhisperTranscriber(
-            model_name=args.whisper_model,
-            device=args.whisper_device,
-            language=args.whisper_language,
-        )
-        audio_path = record_push_to_talk(
-            sample_rate=args.voice_sample_rate,
-            max_duration_s=args.voice_max_seconds,
-        )
         try:
-            transcript = transcriber.transcribe_file(audio_path)
-        finally:
-            remove_temp_audio_file(audio_path)
-    except VoiceDependencyError as exc:
-        raise SystemExit(f"Voice dependencies are unavailable: {exc}") from exc
+            transcriber = LocalWhisperTranscriber(
+                model_name=args.whisper_model,
+                device=args.whisper_device,
+                language=args.whisper_language,
+            )
+            audio_path = record_push_to_talk(
+                sample_rate=args.voice_sample_rate,
+                max_duration_s=args.voice_max_seconds,
+            )
+            try:
+                transcript = transcriber.transcribe_file(audio_path)
+            finally:
+                remove_temp_audio_file(audio_path)
+        except VoiceDependencyError as exc:
+            raise SystemExit(f"Voice dependencies are unavailable: {exc}") from exc
 
     print("\n─── Transcript ───")
     print(transcript)
