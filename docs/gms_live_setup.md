@@ -89,6 +89,12 @@ Or in `~/.bashrc` / `~/.zshrc` for persistence.
 
 ## Step 5: Start the MCP server
 
+Ensure simulation is not forced in your shell:
+
+```bash
+unset GMS_SIMULATE
+```
+
 **For local Ollama use (stdio):**
 
 ```bash

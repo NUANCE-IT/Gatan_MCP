@@ -113,7 +113,7 @@ def _build_mcp_connections(server_url: str = "") -> dict:
                 "command": sys.executable,
                 "args": [_SERVER_SCRIPT, "--transport", "stdio"],
                 "transport": "stdio",
-                "env": {**os.environ, "GMS_SIMULATE": "1"},
+                "env": {**os.environ},
             }
         }
 

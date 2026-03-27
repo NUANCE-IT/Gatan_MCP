@@ -222,6 +222,7 @@ class TestMCPServerTools:
         data = self._parse(raw)
         assert data["success"] is True
         assert data["simulation_mode"] is True
+        assert data["runtime_mode"] == "simulation"
         assert "optics" in data
         assert "stage" in data
         assert "camera" in data
@@ -819,6 +820,51 @@ class TestMCPServerTools:
             "LiveProcessingJobResult",
             "LiveProcessingJobStop",
         ]
+
+    def test_bridge_first_routing_for_state_and_tem(self, server, monkeypatch) -> None:
+        from gms_mcp.server import AcquireTEMInput
+
+        calls: list[tuple[str, dict]] = []
+
+        def fake_bridge_dispatch(function_name: str, params: dict) -> dict:
+            calls.append((function_name, dict(params)))
+            if function_name == "GetMicroscopeState":
+                return {
+                    "success": True,
+                    "simulation_mode": False,
+                    "runtime_mode": "bridge-live",
+                    "optics": {"high_tension_kV": 200.0},
+                    "stage": {"x_um": 0.0, "y_um": 0.0, "z_um": 0.0, "alpha_deg": 0.0, "beta_deg": 0.0},
+                    "beam": {"shift_x": 0.0, "shift_y": 0.0},
+                    "eels": {"energy_offset_eV": 0.0, "slit_width_eV": 10.0, "in_eels_mode": False},
+                    "camera": {"name": "BridgeCam", "inserted": True, "temp_c": -20.0, "n_signals": 3},
+                }
+            if function_name == "AcquireTEMImage":
+                return {
+                    "success": True,
+                    "acquisition_type": "TEM",
+                    "name": "TEM_bridge",
+                    "shape": [1024, 1024],
+                    "dtype": "float32",
+                    "statistics": {"min": 0.0, "max": 1.0, "mean": 0.5, "std": 0.1},
+                    "calibration": {"origin": 0.0, "scale": 0.02, "unit": "nm"},
+                    "metadata": {"exposure_s": 1.0, "high_tension_kV": 200.0, "magnification": 100000.0},
+                }
+            return {"success": True}
+
+        monkeypatch.setattr(server, "_BRIDGE_ZMQ_ENDPOINT", "tcp://bridge-host:5555")
+        monkeypatch.setattr(server, "_bridge_dispatch", fake_bridge_dispatch)
+
+        state = self._parse(server.gms_get_microscope_state())
+        assert state["success"] is True
+        assert state["runtime_mode"] == "bridge-live"
+        assert state["simulation_mode"] is False
+
+        tem = self._parse(server.gms_acquire_tem_image(AcquireTEMInput()))
+        assert tem["success"] is True
+        assert tem["acquisition_type"] == "TEM"
+
+        assert [name for name, _ in calls] == ["GetMicroscopeState", "AcquireTEMImage"]
 
     def test_live_maximum_spot_mapping_bridge_delegation(self, server, monkeypatch) -> None:
         from gms_mcp.server import LiveProcessingJobQuery, StartLiveProcessingJobInput

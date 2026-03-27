@@ -145,6 +145,7 @@ GMS_SIMULATE=1 pytest tests/ -v -m "not ollama"
 **`ImportError: No module named 'DigitalMicrograph'`**
 This is expected outside GMS. The DMSimulator activates automatically.
 Set `GMS_SIMULATE=1` to force simulation mode explicitly.
+For live bridge mode, ensure `GMS_SIMULATE` is unset.
 
 **`ConnectionRefusedError` on ZeroMQ port 5555**
 The DM bridge is not running. Open the GMS Python console and re-run

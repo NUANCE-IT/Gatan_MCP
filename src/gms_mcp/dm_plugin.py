@@ -735,6 +735,558 @@ def _dispatch(cmd: dict) -> dict:
         DM.IFSetImageMode()
         return {"success": True, "in_image_mode": DM.IFIsInImageMode()}
 
+    # ── High-level bridge-first MCP commands ───────────────────────────────
+    if func == "GetMicroscopeState":
+        camera = DM.CM_GetCurrentCamera()
+        return {
+            "success": True,
+            "runtime_mode": "bridge-live",
+            "simulation_mode": False,
+            "optics": {
+                "high_tension_kV": DM.EMGetHighTension() / 1000 if DM.EMCanGetHighTension() else None,
+                "spot_size": DM.EMGetSpotSize(),
+                "brightness": DM.EMGetBrightness(),
+                "focus_um": DM.EMGetFocus(),
+                "magnification": DM.EMGetMagnification() if DM.EMCanGetMagnification() else None,
+                "mag_index": DM.EMGetMagIndex(),
+                "operation_mode": DM.EMGetOperationMode(),
+                "illumination_mode": DM.EMGetIlluminationMode(),
+                "camera_length_mm": DM.EMGetCameraLength() if DM.EMCanGetCameraLength() else None,
+            },
+            "stage": {
+                "x_um": DM.EMGetStageX(),
+                "y_um": DM.EMGetStageY(),
+                "z_um": DM.EMGetStageZ(),
+                "alpha_deg": DM.EMGetStageAlpha(),
+                "beta_deg": DM.EMGetStageBeta(),
+            },
+            "beam": {
+                "shift_x": DM.EMGetBeamShift(0.0, 0.0)[0],
+                "shift_y": DM.EMGetBeamShift(0.0, 0.0)[1],
+            },
+            "eels": {
+                "energy_offset_eV": DM.IFGetEnergyLoss(0),
+                "slit_width_eV": DM.IFCGetSlitWidth(),
+                "in_eels_mode": DM.IFIsInEELSMode(),
+            },
+            "camera": {
+                "name": DM.CM_GetCameraName(camera),
+                "inserted": DM.CM_GetCameraInserted(camera),
+                "temp_c": DM.CM_GetActualTemperature_C(camera),
+                "n_signals": DM.DSGetNumberOfSignals(),
+            },
+        }
+
+    if func == "GetStagePosition":
+        return {
+            "success": True,
+            "stage": {
+                "x_um": DM.EMGetStageX(),
+                "y_um": DM.EMGetStageY(),
+                "z_um": DM.EMGetStageZ(),
+                "alpha_deg": DM.EMGetStageAlpha(),
+                "beta_deg": DM.EMGetStageBeta(),
+            },
+        }
+
+    if func == "SetStagePosition":
+        flags = 0
+        args = [0.0, 0.0, 0.0, 0.0, 0.0]
+        if "x_um" in params:
+            flags |= 1
+            args[0] = float(params["x_um"])
+        if "y_um" in params:
+            flags |= 2
+            args[1] = float(params["y_um"])
+        if "z_um" in params:
+            flags |= 4
+            args[2] = float(params["z_um"])
+        if "alpha_deg" in params:
+            flags |= 8
+            args[3] = float(params["alpha_deg"])
+        if "beta_deg" in params:
+            flags |= 16
+            args[4] = float(params["beta_deg"])
+        if flags == 0:
+            return {
+                "success": False,
+                "error": "No axes specified. Provide at least one of x_um, y_um, z_um, alpha_deg, or beta_deg.",
+            }
+
+        DM.EMSetStagePositions(flags, *args)
+        DM.EMWaitUntilReady()
+        return {
+            "success": True,
+            "moved_flags": flags,
+            "new_position": {
+                "x_um": DM.EMGetStageX(),
+                "y_um": DM.EMGetStageY(),
+                "z_um": DM.EMGetStageZ(),
+                "alpha_deg": DM.EMGetStageAlpha(),
+                "beta_deg": DM.EMGetStageBeta(),
+            },
+        }
+
+    if func == "SetBeamParameters":
+        applied = {}
+        if "spot_size" in params:
+            DM.EMSetSpotSize(int(params["spot_size"]))
+            applied["spot_size"] = int(params["spot_size"])
+        if "focus_um" in params:
+            DM.EMSetFocus(float(params["focus_um"]))
+            applied["focus_um"] = float(params["focus_um"])
+        if "shift_x" in params or "shift_y" in params:
+            sx = float(params.get("shift_x", 0.0))
+            sy = float(params.get("shift_y", 0.0))
+            DM.EMSetCalibratedBeamShift(sx, sy)
+            applied["beam_shift"] = [sx, sy]
+        if "tilt_x" in params or "tilt_y" in params:
+            tx = float(params.get("tilt_x", 0.0))
+            ty = float(params.get("tilt_y", 0.0))
+            DM.EMSetBeamTilt(tx, ty)
+            applied["beam_tilt"] = [tx, ty]
+        if "obj_stig_x" in params or "obj_stig_y" in params:
+            sx = float(params.get("obj_stig_x", 0.0))
+            sy = float(params.get("obj_stig_y", 0.0))
+            DM.EMSetObjectiveStigmation(sx, sy)
+            applied["obj_stigmation"] = [sx, sy]
+
+        return {
+            "success": True,
+            "applied_settings": applied,
+            "current_state": {
+                "spot_size": DM.EMGetSpotSize(),
+                "focus_um": DM.EMGetFocus(),
+                "brightness": DM.EMGetBrightness(),
+            },
+        }
+
+    if func == "ConfigureDetectors":
+        camera = DM.CM_GetCurrentCamera()
+        applied = {}
+
+        if "insert_camera" in params:
+            DM.CM_SetCameraInserted(camera, int(bool(params["insert_camera"])))
+            applied["camera_inserted"] = bool(params["insert_camera"])
+        if "target_temp_c" in params:
+            DM.CM_SetTargetTemperature_C(camera, 1, float(params["target_temp_c"]))
+            applied["target_temp_c"] = float(params["target_temp_c"])
+
+        signal_map = {
+            "haadf_enabled": 0,
+            "bf_enabled": 1,
+            "abf_enabled": 2,
+        }
+        for key, ch in signal_map.items():
+            if key in params:
+                DM.DSSetSignalEnabled(ch, int(bool(params[key])))
+                applied[key] = bool(params[key])
+
+        return {
+            "success": True,
+            "applied": applied,
+            "status": {
+                "camera_inserted": DM.CM_GetCameraInserted(camera),
+                "actual_temp_c": DM.CM_GetActualTemperature_C(camera),
+                "haadf_enabled": DM.DSGetSignalEnabled(0),
+                "bf_enabled": DM.DSGetSignalEnabled(1),
+                "abf_enabled": DM.DSGetSignalEnabled(2),
+            },
+        }
+
+    if func == "AcquireTEMImage":
+        camera = DM.CM_GetCurrentCamera()
+        exposure = float(params.get("exposure_s", 1.0))
+        binning = int(params.get("binning", 1))
+        processing = int(params.get("processing", 3))
+        acq = DM.CM_CreateAcquisitionParameters_FullCCD(
+            camera, processing, exposure, binning, binning
+        )
+        if "roi" in params and params["roi"] is not None:
+            DM.CM_SetCCDReadArea(acq, *[int(v) for v in params["roi"]])
+
+        DM.CM_Validate_AcquisitionParameters(camera, acq)
+        img = DM.CM_AcquireImage(camera, acq)
+        img.SetName(f"TEM_exp{exposure}s_bin{binning}")
+        return {"success": True, "acquisition_type": "TEM", **_image_to_dict(img, False)}
+
+    if func == "AcquireSTEM":
+        width = int(params.get("width", 512))
+        height = int(params.get("height", 512))
+        dwell_us = float(params.get("dwell_us", 10.0))
+        rotation_deg = float(params.get("rotation_deg", 0.0))
+        signals = params.get("signals", [0, 1])
+
+        DM.DSSetFrameSize(width, height)
+        DM.DSSetPixelTime(dwell_us)
+        DM.DSSetRotation(rotation_deg)
+        n_signals = DM.DSGetNumberOfSignals()
+        for ch in range(n_signals):
+            DM.DSSetSignalEnabled(ch, 1 if ch in signals else 0)
+
+        DM.DSStartAcquisition()
+        DM.DSWaitUntilFinished()
+        img = DM.GetFrontImage()
+        return {
+            "success": True,
+            "acquisition_type": "STEM",
+            "scan_parameters": {
+                "width": width,
+                "height": height,
+                "dwell_us": dwell_us,
+                "rotation_deg": rotation_deg,
+                "signals_enabled": signals,
+                "total_frame_time_s": width * height * dwell_us * 1e-6,
+            },
+            **_image_to_dict(img, False),
+        }
+
+    if func == "Acquire4DSTEM":
+        if "camera_length_mm" in params and params["camera_length_mm"] is not None:
+            DM.EMSetCameraLength(float(params["camera_length_mm"]))
+        cl = DM.EMGetCameraLength() if DM.EMCanGetCameraLength() else None
+
+        scan_x = int(params.get("scan_x", 64))
+        scan_y = int(params.get("scan_y", 64))
+        dwell_us = float(params.get("dwell_us", 1000.0))
+        convergence_mrad = params.get("convergence_mrad")
+
+        img4d = DM.GetFrontImage()
+        arr = img4d.GetNumArray()
+        if arr.ndim == 2 and arr.shape[1] > arr.shape[0]:
+            scan_y_arr = arr.shape[0]
+            total = arr.shape[1]
+            det_px = int(np.sqrt(total // scan_y_arr))
+            scan_x_arr = total // (det_px * det_px)
+            det_shape = [det_px, det_px]
+            scan_shape = [scan_y_arr, scan_x_arr]
+        elif arr.ndim == 4:
+            scan_shape = [arr.shape[0], arr.shape[1]]
+            det_shape = [arr.shape[2], arr.shape[3]]
+        else:
+            return {
+                "success": False,
+                "error": "Front image is not a 4D-STEM dataset (expected 4D array).",
+            }
+
+        total_patterns = scan_shape[0] * scan_shape[1]
+        size_mb = (total_patterns * (det_shape[0] * det_shape[1]) * 4) / 1e6
+        return {
+            "success": True,
+            "acquisition_type": "4D-STEM",
+            "dataset": {
+                "scan_shape": scan_shape,
+                "detector_shape": det_shape,
+                "full_shape": scan_shape + det_shape,
+                "total_patterns": total_patterns,
+                "estimated_size_MB": round(size_mb, 1),
+                "dwell_us": dwell_us,
+                "camera_length_mm": cl,
+                "convergence_mrad": convergence_mrad,
+                "estimated_acq_time_s": round(total_patterns * dwell_us * 1e-6, 1),
+            },
+            "note": "4D dataset is available in GMS workspace.",
+        }
+
+    if func == "AcquireEELS":
+        exposure = float(params.get("exposure_s", 1.0))
+        energy_offset = float(params.get("energy_offset_eV", 0.0))
+        slit_width = float(params.get("slit_width_eV", 10.0))
+        dispersion_idx = int(params.get("dispersion_idx", 0))
+        full_vertical_binning = bool(params.get("full_vertical_binning", True))
+
+        DM.IFSetEELSMode()
+        DM.IFCSetEnergy(energy_offset)
+        DM.IFCSetActiveDispersions(dispersion_idx)
+        if slit_width > 0:
+            DM.IFCSetSlitWidth(slit_width)
+            DM.IFCSetSlitIn(1)
+        else:
+            DM.IFCSetSlitIn(0)
+
+        camera = DM.CM_GetCurrentCamera()
+        acq = DM.CM_CreateAcquisitionParameters_FullCCD(camera, 3, exposure, 1, 1)
+        if full_vertical_binning:
+            DM.CM_SetBinning(acq, 1, 2048)
+        DM.CM_Validate_AcquisitionParameters(camera, acq)
+        spec_img = DM.CM_AcquireImage(camera, acq)
+
+        arr = spec_img.GetNumArray().flatten()
+        n_ch = len(arr)
+        dispersions = [0.1, 0.25, 0.5, 1.0]
+        disp = dispersions[min(dispersion_idx, len(dispersions) - 1)]
+        energy_axis = energy_offset + np.arange(n_ch) * disp
+        zlp_idx = int(np.argmax(arr))
+        zlp_energy = float(energy_axis[zlp_idx])
+
+        return {
+            "success": True,
+            "acquisition_type": "EELS",
+            "spectrum": {
+                "n_channels": n_ch,
+                "energy_offset_eV": energy_offset,
+                "dispersion_eV_ch": disp,
+                "energy_range_eV": [float(energy_axis[0]), float(energy_axis[-1])],
+                "zlp_centre_eV": zlp_energy,
+                "zlp_channel": zlp_idx,
+                "max_intensity": float(arr.max()),
+                "slit_width_eV": slit_width,
+                "exposure_s": exposure,
+            },
+        }
+
+    if func == "AcquireDiffraction":
+        exposure = float(params.get("exposure_s", 0.5))
+        binning = int(params.get("binning", 1))
+        if "camera_length_mm" in params and params["camera_length_mm"] is not None:
+            DM.EMSetCameraLength(float(params["camera_length_mm"]))
+        cl = DM.EMGetCameraLength() if DM.EMCanGetCameraLength() else 100.0
+
+        camera = DM.CM_GetCurrentCamera()
+        acq = DM.CM_CreateAcquisitionParameters_FullCCD(camera, 3, exposure, binning, binning)
+        DM.CM_Validate_AcquisitionParameters(camera, acq)
+        dp = DM.CM_AcquireImage(camera, acq)
+        arr = dp.GetNumArray()
+        h, w = arr.shape[:2]
+        cx, cy = w // 2, h // 2
+
+        y_idx, x_idx = np.indices((h, w))
+        r = np.sqrt((x_idx - cx) ** 2 + (y_idx - cy) ** 2).astype(int)
+        r_max = min(cx, cy)
+        radial = np.array([arr[r == ri].mean() if np.any(r == ri) else 0 for ri in range(r_max)])
+        try:
+            from scipy.signal import find_peaks
+
+            peaks, _ = find_peaks(radial, height=radial.mean() * 1.5, distance=10)
+            peak_list = peaks.tolist()[:8]
+        except Exception:
+            peak_list = []
+
+        scale_inv_A = 5.0 / cl
+        return {
+            "success": True,
+            "acquisition_type": "Diffraction",
+            "pattern": {
+                "shape": [h, w],
+                "camera_length_mm": cl,
+                "pixel_scale_inv_A": round(scale_inv_A, 4),
+                "direct_beam_centre": [cx, cy],
+                "ring_radii_px": peak_list,
+                "d_spacings_A": [round(1.0 / (rv * scale_inv_A), 3) for rv in peak_list if rv > 0],
+                "max_intensity": float(arr.max()),
+                "mean_bg": float(radial[:10].mean()) if len(radial) >= 10 else float(arr.mean()),
+            },
+        }
+
+    if func == "ApplyImageFilter":
+        source = DM.GetFrontImage()
+        arr = np.asarray(source.GetNumArray(), dtype=np.float32)
+        if arr.ndim != 2:
+            return {"success": False, "error": "Front image must be 2D for image filtering."}
+
+        filtered = _extract_roi(arr, params.get("roi")).copy()
+        median_size = int(params.get("median_size", 0))
+        gaussian_sigma = float(params.get("gaussian_sigma", 0.0))
+        if median_size > 0:
+            filtered = median_filter(filtered, size=median_size)
+        if gaussian_sigma > 0:
+            filtered = gaussian_filter(filtered, sigma=gaussian_sigma)
+
+        result_img = _create_derived_image(
+            filtered.astype(np.float32),
+            str(params.get("output_name", "Filtered_Image")),
+            source,
+        )
+        if not bool(params.get("show_result", True)):
+            try:
+                result_img.DeleteImage()
+            except Exception:
+                pass
+        return {
+            "success": True,
+            "operation": {
+                "median_size": median_size,
+                "gaussian_sigma": gaussian_sigma,
+                "roi": params.get("roi"),
+            },
+            "image": _image_to_dict(result_img, False),
+        }
+
+    if func == "ComputeRadialProfile":
+        source = DM.GetFrontImage()
+        data = np.asarray(source.GetNumArray(), dtype=np.float32)
+        if data.ndim != 2:
+            return {"success": False, "error": "Front image must be 2D for radial-profile analysis."}
+
+        result = _compute_radial_profile_result(data, {
+            "roi": params.get("roi"),
+            "profile_mode": params.get("mode", "fft"),
+            "binning": int(params.get("binning", 1)),
+            "mask_center_lines": bool(params.get("mask_center_lines", True)),
+            "mask_percent": float(params.get("mask_percent", 5.0)),
+            "profile_metric": str(params.get("profile_metric", "radial_max_minus_mean")),
+            "smooth_sigma": float(params.get("smooth_sigma", 1.0)),
+        })
+        return {
+            "success": True,
+            "analysis": result["summary"],
+            "profile": result["data"].astype(np.float32).tolist(),
+        }
+
+    if func == "ComputeMaxFFT":
+        source = DM.GetFrontImage()
+        data = np.asarray(source.GetNumArray(), dtype=np.float32)
+        if data.ndim != 2:
+            return {"success": False, "error": "Front image must be 2D for max-FFT analysis."}
+
+        result = _compute_max_fft_result(data, params)
+        result_img = _create_derived_image(
+            np.asarray(result["data"], dtype=np.float32),
+            str(params.get("output_name", "FFT_Max")),
+            source,
+        )
+        if not bool(params.get("show_result", True)):
+            try:
+                result_img.DeleteImage()
+            except Exception:
+                pass
+
+        return {
+            "success": True,
+            "analysis": result["summary"],
+            "image": _image_to_dict(result_img, False),
+        }
+
+    if func == "Run4DSTEMMaximumSpotMapping":
+        source = DM.GetFrontImage()
+        arr4d = _resolve_4dstem_array(source).astype(np.float32)
+        result = _compute_maximum_spot_mapping_result(arr4d, params)
+        result_img = _create_derived_image(
+            np.asarray(result["data"], dtype=np.float32),
+            str(params.get("output_name", "4DSTEM_Maximum_Spot_Map")),
+            source,
+        )
+        if not bool(params.get("show_result", True)):
+            try:
+                result_img.DeleteImage()
+            except Exception:
+                pass
+        return {
+            "success": True,
+            "analysis": result["summary"],
+            "maps": {
+                "theta_range": result["summary"]["theta_range"],
+                "radius_range": result["summary"]["radius_range"],
+                "intensity_range": result["summary"]["intensity_range"],
+            },
+            "image": _image_to_dict(result_img, False),
+        }
+
+    if func == "AcquireTiltSeries":
+        start_deg = float(params.get("start_deg", -60.0))
+        end_deg = float(params.get("end_deg", 60.0))
+        step_deg = float(params.get("step_deg", 2.0))
+        exposure_s = float(params.get("exposure_s", 1.0))
+        binning = int(params.get("binning", 2))
+        save_dir = params.get("save_dir")
+
+        camera = DM.CM_GetCurrentCamera()
+        acq = DM.CM_CreateAcquisitionParameters_FullCCD(camera, 3, exposure_s, binning, binning)
+        DM.CM_Validate_AcquisitionParameters(camera, acq)
+
+        angles = []
+        angle = start_deg
+        while angle <= end_deg + 1e-6:
+            angles.append(round(angle, 3))
+            angle += step_deg
+
+        per_tilt_stats = []
+        t_start = time.time()
+        for ang in angles:
+            DM.EMSetStageAlpha(ang)
+            DM.EMWaitUntilReady()
+            img = DM.CM_AcquireImage(camera, acq)
+            arr = img.GetNumArray()
+            per_tilt_stats.append({
+                "angle_deg": ang,
+                "mean": round(float(arr.mean()), 2),
+                "max": round(float(arr.max()), 2),
+            })
+            if save_dir:
+                DM.SaveImage(img, os.path.join(str(save_dir), f"tilt_{ang:+.1f}.dm4"))
+
+        elapsed = round(time.time() - t_start, 1)
+        return {
+            "success": True,
+            "tilt_series": {
+                "n_frames": len(angles),
+                "angle_range": [start_deg, end_deg],
+                "step_deg": step_deg,
+                "exposure_s": exposure_s,
+                "binning": binning,
+                "elapsed_s": elapsed,
+                "saved_to": save_dir,
+            },
+            "per_tilt": per_tilt_stats,
+        }
+
+    if func == "Run4DSTEMAnalysis":
+        img4d = DM.GetFrontImage()
+        arr = img4d.GetNumArray()
+        if arr.ndim == 2 and arr.shape[1] > arr.shape[0]:
+            scan_y = arr.shape[0]
+            total = arr.shape[1]
+            det_px = int(np.sqrt(total // scan_y))
+            scan_x = total // (det_px * det_px)
+            arr = arr.reshape(scan_y, scan_x, det_px, det_px)
+        elif arr.ndim != 4:
+            return {
+                "success": False,
+                "error": "Front image is not a 4D-STEM dataset (expected 4D array).",
+            }
+
+        inner_angle_mrad = float(params.get("inner_angle_mrad", 10.0))
+        outer_angle_mrad = float(params.get("outer_angle_mrad", 40.0))
+        analysis_type = str(params.get("analysis_type", "virtual_haadf"))
+
+        scan_y, scan_x, det_y, det_x = arr.shape
+        cx, cy = det_x // 2, det_y // 2
+        px_per_mrad = 1.0
+        inner_px = inner_angle_mrad * px_per_mrad
+        outer_px = outer_angle_mrad * px_per_mrad
+
+        yy, xx = np.ogrid[:det_y, :det_x]
+        r = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
+        mask = (r >= inner_px) & (r <= outer_px)
+
+        if analysis_type in ("virtual_haadf", "virtual_bf"):
+            virt = arr[:, :, mask].sum(axis=-1)
+        elif analysis_type == "com":
+            weights = arr.sum(axis=(2, 3), keepdims=True) + 1e-10
+            virt = (arr * xx[np.newaxis, np.newaxis]).sum(axis=(2, 3)) / weights.squeeze()
+        elif analysis_type == "dpc":
+            com_x = (arr * xx[np.newaxis, np.newaxis]).sum(axis=(2, 3)) / (arr.sum(axis=(2, 3)) + 1e-10)
+            com_y = (arr * yy[np.newaxis, np.newaxis]).sum(axis=(2, 3)) / (arr.sum(axis=(2, 3)) + 1e-10)
+            virt = np.sqrt(com_x ** 2 + com_y ** 2)
+        else:
+            virt = np.zeros((scan_y, scan_x), dtype=np.float32)
+
+        virt = np.asarray(virt, dtype=np.float32)
+        return {
+            "success": True,
+            "analysis": {
+                "type": analysis_type,
+                "inner_mrad": inner_angle_mrad,
+                "outer_mrad": outer_angle_mrad,
+                "scan_shape": [scan_y, scan_x],
+                "result_shape": list(virt.shape),
+                "min": float(virt.min()),
+                "max": float(virt.max()),
+                "mean": float(virt.mean()),
+                "std": float(virt.std()),
+            },
+        }
+
     # ── Utility ────────────────────────────────────────────────────────────
     if func == "GetFrontImage":
         img = DM.GetFrontImage()

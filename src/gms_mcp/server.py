@@ -686,8 +686,18 @@ _live_jobs: dict[str, dict[str, object]] = {}
 _live_jobs_lock = threading.Lock()
 
 
-def _live_jobs_use_bridge() -> bool:
+def _bridge_mode_enabled() -> bool:
     return bool(_BRIDGE_ZMQ_ENDPOINT)
+
+
+def _runtime_mode() -> str:
+    if _bridge_mode_enabled():
+        return "bridge-live"
+    return "simulation" if _SIMULATE else "in-process-live"
+
+
+def _live_jobs_use_bridge() -> bool:
+    return _bridge_mode_enabled()
 
 
 def _bridge_dispatch(function_name: str, params: dict[str, object]) -> dict[str, object]:
@@ -723,6 +733,14 @@ def _bridge_dispatch(function_name: str, params: dict[str, object]) -> dict[str,
     if not isinstance(response, dict):
         raise RuntimeError("Bridge response is malformed.")
     return response
+
+
+def _run_bridge_tool(function_name: str, params: dict[str, object] | None = None) -> dict[str, object]:
+    payload = _bridge_dispatch(function_name, params or {})
+    if payload.get("success") is False:
+        detail = payload.get("error", f"Bridge call failed: {function_name}")
+        raise RuntimeError(str(detail))
+    return payload
 
 
 def _summarize_array(data: np.ndarray) -> dict[str, object]:
@@ -1138,6 +1156,12 @@ def gms_get_microscope_state() -> str:
     Call this first before any acquisition or control operation.
     """
     try:
+        if _bridge_mode_enabled():
+            result = _run_bridge_tool("GetMicroscopeState")
+            result["runtime_mode"] = _runtime_mode()
+            result["simulation_mode"] = False
+            return json.dumps(result, indent=2)
+
         camera = DM.CM_GetCurrentCamera()
         cam_name = DM.CM_GetCameraName(camera)
         cam_inserted = DM.CM_GetCameraInserted(camera)
@@ -1146,6 +1170,7 @@ def gms_get_microscope_state() -> str:
         result = {
             "success": True,
             "simulation_mode": _SIMULATE,
+            "runtime_mode": _runtime_mode(),
             "optics": {
                 "high_tension_kV": DM.EMGetHighTension() / 1000 if DM.EMCanGetHighTension() else None,
                 "spot_size":       DM.EMGetSpotSize(),
@@ -1204,6 +1229,12 @@ def gms_get_front_image(params: FrontImageInput = FrontImageInput()) -> str:
         params.include_tags (bool): Include serialisable image tags when available.
     """
     try:
+        if _bridge_mode_enabled():
+            result = _run_bridge_tool("GetFrontImage", {
+                "include_data": params.include_data,
+            })
+            return json.dumps(result, indent=2)
+
         img = DM.GetFrontImage()
         result = {"success": True, "image": _image_to_response(
             img,
@@ -1229,6 +1260,10 @@ def gms_apply_image_filter(params: ImageFilterInput) -> str:
     Apply median and/or Gaussian filtering to the front-most image or ROI.
     """
     try:
+        if _bridge_mode_enabled():
+            result = _run_bridge_tool("ApplyImageFilter", params.model_dump())
+            return json.dumps(result, indent=2)
+
         source = DM.GetFrontImage()
         arr = np.asarray(source.GetNumArray(), dtype=np.float32)
         if arr.ndim != 2:
@@ -1274,6 +1309,10 @@ def gms_compute_radial_profile(params: RadialProfileInput) -> str:
     Compute a 1D radial profile from a diffraction pattern or from the FFT of a TEM image.
     """
     try:
+        if _bridge_mode_enabled():
+            result = _run_bridge_tool("ComputeRadialProfile", params.model_dump())
+            return json.dumps(result, indent=2)
+
         source = DM.GetFrontImage()
         data = np.asarray(source.GetNumArray(), dtype=np.float32)
         if data.ndim != 2:
@@ -1375,6 +1414,10 @@ def gms_compute_max_fft(params: MaxFFTInput) -> str:
     Compute the maximum FFT across a grid of local windows from the front-most image.
     """
     try:
+        if _bridge_mode_enabled():
+            result = _run_bridge_tool("ComputeMaxFFT", params.model_dump())
+            return json.dumps(result, indent=2)
+
         source = DM.GetFrontImage()
         data = np.asarray(source.GetNumArray(), dtype=np.float32)
         if data.ndim != 2:
@@ -1427,6 +1470,10 @@ def gms_run_4dstem_maximum_spot_mapping(params: MaxSpotMapInput) -> str:
     Compute a maximum-spot orientation-like map from the loaded 4D-STEM dataset.
     """
     try:
+        if _bridge_mode_enabled():
+            result = _run_bridge_tool("Run4DSTEMMaximumSpotMapping", params.model_dump())
+            return json.dumps(result, indent=2)
+
         img4d = DM.GetFrontImage()
         arr: np.ndarray = _resolve_4dstem_array(img4d).astype(np.float32)
         scan_y, scan_x, det_y, det_x = arr.shape
@@ -1708,6 +1755,10 @@ def gms_acquire_tem_image(params: AcquireTEMInput) -> str:
         - Acquisition metadata (exposure, HT, magnification)
     """
     try:
+        if _bridge_mode_enabled():
+            result = _run_bridge_tool("AcquireTEMImage", params.model_dump())
+            return json.dumps(result, indent=2)
+
         if _SIMULATE and hasattr(DM, "_state"):
             DM._state.operation_mode = "TEM"
         camera = DM.CM_GetCurrentCamera()
@@ -1769,6 +1820,11 @@ def gms_acquire_stem(
                 rotation_deg=rotation_deg,
                 signals=[0, 1] if signals is None else signals,
             )
+
+        if _bridge_mode_enabled():
+            result = _run_bridge_tool("AcquireSTEM", params.model_dump())
+            return json.dumps(result, indent=2)
+
         DM.DSSetFrameSize(params.width, params.height)
         DM.DSSetPixelTime(params.dwell_us)
         DM.DSSetRotation(params.rotation_deg)
@@ -1838,6 +1894,10 @@ def gms_acquire_4d_stem(params: Acquire4DSTEMInput) -> str:
           the GMS workspace or save to disk.
     """
     try:
+        if _bridge_mode_enabled():
+            result = _run_bridge_tool("Acquire4DSTEM", params.model_dump())
+            return json.dumps(result, indent=2)
+
         if params.camera_length_mm is not None:
             DM.EMSetCameraLength(params.camera_length_mm)
         cl = DM.EMGetCameraLength() if DM.EMCanGetCameraLength() else None
@@ -1934,6 +1994,10 @@ def gms_acquire_eels(
                 full_vertical_binning=full_vertical_binning,
             )
 
+        if _bridge_mode_enabled():
+            result = _run_bridge_tool("AcquireEELS", params.model_dump())
+            return json.dumps(result, indent=2)
+
         # Configure GIF / spectrometer
         DM.IFSetEELSMode()
         DM.IFCSetEnergy(params.energy_offset_eV)
@@ -2017,6 +2081,10 @@ def gms_acquire_diffraction(params: AcquireDiffractionInput) -> str:
     direct-beam centre estimate, and brightest ring radii.
     """
     try:
+        if _bridge_mode_enabled():
+            result = _run_bridge_tool("AcquireDiffraction", params.model_dump())
+            return json.dumps(result, indent=2)
+
         if params.camera_length_mm is not None:
             DM.EMSetCameraLength(params.camera_length_mm)
         cl = DM.EMGetCameraLength() if DM.EMCanGetCameraLength() else 100.0
@@ -2106,6 +2174,10 @@ def gms_get_stage_position() -> str:
         beta_deg           (float) : Beta tilt angle in degrees.
     """
     try:
+        if _bridge_mode_enabled():
+            result = _run_bridge_tool("GetStagePosition")
+            return json.dumps(result, indent=2)
+
         result = {
             "success": True,
             "stage": {
@@ -2167,6 +2239,10 @@ def gms_set_stage_position(
             merged = params.model_dump(exclude_none=True)
             merged.update({k: v for k, v in direct_kwargs.items() if v is not None})
             params = SetStageInput(**merged)
+
+        if _bridge_mode_enabled():
+            result = _run_bridge_tool("SetStagePosition", params.model_dump(exclude_none=True))
+            return json.dumps(result, indent=2)
 
         flags = 0
         args = [0.0, 0.0, 0.0, 0.0, 0.0]
@@ -2256,6 +2332,10 @@ def gms_set_beam_parameters(
             merged.update({k: v for k, v in direct_kwargs.items() if v is not None})
             params = SetBeamInput(**merged)
 
+        if _bridge_mode_enabled():
+            result = _run_bridge_tool("SetBeamParameters", params.model_dump(exclude_none=True))
+            return json.dumps(result, indent=2)
+
         applied: dict[str, object] = {}
         if params.spot_size is not None:
             DM.EMSetSpotSize(params.spot_size)
@@ -2316,6 +2396,10 @@ def gms_configure_detectors(params: SetDetectorInput) -> str:
     Returns JSON with detector status after applying configuration.
     """
     try:
+        if _bridge_mode_enabled():
+            result = _run_bridge_tool("ConfigureDetectors", params.model_dump(exclude_none=True))
+            return json.dumps(result, indent=2)
+
         camera = DM.CM_GetCurrentCamera()
         applied: dict[str, object] = {}
 
@@ -2381,6 +2465,10 @@ def gms_acquire_tilt_series(params: TiltSeriesInput) -> str:
     acquisition time.
     """
     try:
+        if _bridge_mode_enabled():
+            result = _run_bridge_tool("AcquireTiltSeries", params.model_dump())
+            return json.dumps(result, indent=2)
+
         import time as _time
         camera = DM.CM_GetCurrentCamera()
         acq = DM.CM_CreateAcquisitionParameters_FullCCD(
@@ -2475,6 +2563,17 @@ def gms_run_4dstem_analysis(
     Returns JSON with the resulting image shape, statistics, and analysis info.
     """
     try:
+        if _bridge_mode_enabled():
+            result = _run_bridge_tool(
+                "Run4DSTEMAnalysis",
+                {
+                    "inner_angle_mrad": inner_angle_mrad,
+                    "outer_angle_mrad": outer_angle_mrad,
+                    "analysis_type": analysis_type,
+                },
+            )
+            return json.dumps(result, indent=2)
+
         img4d = DM.GetFrontImage()
         arr = img4d.GetNumArray()
 
@@ -2562,7 +2661,7 @@ def _parse_args() -> argparse.Namespace:
 if __name__ == "__main__":
     args = _parse_args()
 
-    mode_str = "SIMULATION" if _SIMULATE else "LIVE"
+    mode_str = _runtime_mode().upper()
     if args.transport == "stdio":
         # stdio: no banner on stdout — LangChain reads stdout as JSON-RPC
         import sys as _sys
