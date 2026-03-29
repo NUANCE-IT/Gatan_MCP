@@ -563,10 +563,78 @@ class TiltSeriesInput(BaseModel):
 # Shared helper functions
 # ---------------------------------------------------------------------------
 
-def _tags_to_dict(tags: object) -> dict[str, object]:
-    if hasattr(tags, "to_dict"):
-        return dict(tags.to_dict())
-    return {}
+
+def _clean_tag_value(val):
+    """
+    Normalize tag values:
+    - Convert known byte sequences to strings
+    - Skip unknown byte blobs
+    - Ensure JSON-serializable output
+    """
+    import json
+    if isinstance(val, (bytes, bytearray, memoryview)):
+        byte_map = {
+            b'\xb0C': "oC",
+            b'\xc5': "A",
+            b'\xb5m': "um",
+        }
+        if val in byte_map:
+            val = byte_map[val]
+        else:
+            return None  # skip unknown bytes
+
+    try:
+        json.dumps(val)
+        return val
+    except TypeError:
+        return str(val)
+
+def _tags_to_dict(tg, path=""):
+    """
+    Recursively traverse a Py_TagGroup and return a dict mapping
+    tag paths -> cleaned tag values.
+    """
+    tags = {}
+
+    # Respect IsValid if present
+    if hasattr(tg, "IsValid") and not tg.IsValid():
+        return tags
+
+    # Require TagGroup traversal support
+    if not hasattr(tg, "keys"):
+        try:
+            DM.OkDialog(
+                "This script requires tag group traversal (GMS 3.6.1 or newer)."
+            )
+        except Exception:
+            pass
+        raise RuntimeError("TagGroup traversal not supported")
+
+    for key in tg.keys():
+        try:
+            val = tg[key]
+        except Exception:
+            continue
+
+        cur_path = f"{path}:{key}" if path else key
+
+        # For simulation, DM.Py_TagGroup may not exist, so check by name
+        is_tag_group = False
+        if hasattr(DM, "Py_TagGroup"):
+            is_tag_group = isinstance(val, DM.Py_TagGroup)
+        else:
+            is_tag_group = hasattr(val, "keys")
+
+        if is_tag_group:
+            tags.update(
+                _tags_to_dict(val, cur_path)
+            )
+        else:
+            clean_val = _clean_tag_value(val)
+            if clean_val is not None:
+                tags[cur_path] = clean_val
+
+    return tags
 
 
 def _image_to_response(

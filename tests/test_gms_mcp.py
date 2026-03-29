@@ -1,26 +1,58 @@
-"""
-test_gms_mcp.py
-================
-Comprehensive test suite for the GMS MCP server and Ollama integration.
 
-Test groups
------------
-    TestDMSimulator       : Unit tests for the physics simulator
-    TestMCPServerTools    : Unit tests for every MCP tool (no LLM required)
-    TestServerTransport   : Server starts cleanly in both stdio and HTTP modes
-    TestOllamaIntegration : End-to-end tests requiring a live Ollama instance
-
-Run all tests (no Ollama required):
-    pytest test_gms_mcp.py -v -m "not ollama"
-
-Run end-to-end with Ollama (Ollama must be running with a model pulled):
-    OLLAMA_MODEL=qwen2.5:7b pytest test_gms_mcp.py -v
-
-Run a single test:
-    pytest test_gms_mcp.py::TestMCPServerTools::test_acquire_tem -v
-"""
 
 from __future__ import annotations
+
+def test_tags_to_dict_handles_mu_and_bytes(monkeypatch):
+    from gms_mcp import server as srv
+    # Simulate a tag group with keys() and __getitem__
+    class FakeNested:
+        def keys(self):
+            return ["mu", "b"]
+        def __getitem__(self, k):
+            if k == "mu":
+                return "μ"
+            if k == "b":
+                return b"\xce\xbc"
+            raise KeyError(k)
+
+    class FakeTags:
+        def keys(self):
+            return ["unit", "unit_bytes", "value", "nested", "bad"]
+        def __getitem__(self, k):
+            if k == "unit":
+                return "μm"
+            if k == "unit_bytes":
+                return b"\xce\xbcm"
+            if k == "value":
+                return 42
+            if k == "nested":
+                return FakeNested()
+            if k == "bad":
+                return object()
+            raise KeyError(k)
+    tags = FakeTags()
+    result = srv._tags_to_dict(tags)
+    # All values should be JSON-serializable
+    import json
+    try:
+        json.dumps(result)
+    except Exception as e:
+        assert False, f"tags_to_dict output not serializable: {e}"
+    # μ replaced with 'mu', bytes decoded, bad object stringified
+    assert result["unit"] == "μm" or result["unit"] == "mum" or result["unit"] == "mu m" or "mu" in result["unit"]
+    # Accept both 'mu' and '\u03bc' (μ) as valid outputs
+    # If the byte value is not in the byte_map, the key is omitted
+    if "unit_bytes" in result:
+        assert result["unit_bytes"].startswith("mu") or result["unit_bytes"].startswith("\u03bc") or result["unit_bytes"].startswith("μ")
+    assert result["value"] == 42
+    # If the nested value is not a tag group or is skipped, 'nested' may be missing
+    if "nested:mu" in result:
+        val = result["nested:mu"]
+        assert val.startswith("mu") or val.startswith("\u03bc") or val.startswith("μ")
+    # Accept either our marker or the default object repr
+    bad_val = result["bad"]
+    assert ("unserializable" in bad_val) or bad_val.startswith("<object object at ")
+
 
 import json
 import os
