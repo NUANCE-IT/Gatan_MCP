@@ -1,4 +1,4 @@
-# GMS-MCP 🔬
+# NUANCE-GMS-MCP 🔬
 
 [![arXiv](https://img.shields.io/badge/arXiv-2025.XXXXX-b31b1b.svg)](https://arxiv.org/abs/2025.XXXXX)
 [![Tests](https://github.com/NUANCE-IT/Gatan_MCP/actions/workflows/ci.yml/badge.svg)](https://github.com/NUANCE-IT/Gatan_MCP/actions/workflows/ci.yml)
