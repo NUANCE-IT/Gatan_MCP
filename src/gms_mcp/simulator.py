@@ -36,6 +36,9 @@ class SimTagGroup:
     def __init__(self) -> None:
         self._store: dict[str, Any] = {}
 
+    def keys(self):
+        return list(self._store.keys())
+
     def SetTagAsString(self, key: str, value: str) -> None:
         self._store[key] = value
 

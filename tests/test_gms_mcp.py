@@ -271,6 +271,8 @@ class TestMCPServerTools:
 
         raw = server.gms_get_front_image(FrontImageInput(include_tags=True))
         data = self._parse(raw)
+        if not data.get("success", False):
+            print("DEBUG: get_front_image failure:", data)
         assert data["success"] is True
         assert data["image"]["shape"][0] > 0
         assert "tags" in data["image"]

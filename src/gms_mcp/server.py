@@ -1311,7 +1311,13 @@ def gms_get_front_image(params: FrontImageInput = FrontImageInput()) -> str:
         )}
         return json.dumps(result, indent=2)
     except Exception as e:
-        return _build_error(str(e), "Ensure a front-most image is available in GMS.")
+        import traceback
+        import sys
+        print("[gms_get_front_image] Exception:", file=sys.stderr)
+        traceback.print_exc()
+        error = _build_error(str(e), "Ensure a front-most image is available in GMS.")
+        print("[gms_get_front_image] Error structure:", error, file=sys.stderr)
+        return error
 
 
 # ---------------------------------------------------------------------------

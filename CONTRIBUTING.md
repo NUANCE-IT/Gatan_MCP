@@ -9,7 +9,7 @@ standards we apply.
 ## Ways to Contribute
 
 - **Bug reports** — open an Issue with the label `bug`
-- **New modalities** — EFTEM, Lorentz TEM, EELS-SI, EDX mapping
+- **New modalities** — EFTEM, Lorentz TEM, EELS-SI, EDS mapping
 - **New Ollama model benchmarks** — run `TestOllamaIntegration` with
   your model and open a PR updating `README.md` Table 4
 - **Live GMS testing** — report which GMS version / microscope hardware
