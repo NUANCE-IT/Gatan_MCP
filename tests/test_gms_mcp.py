@@ -900,6 +900,316 @@ class TestMCPServerTools:
 
         assert [name for name, _ in calls] == ["GetMicroscopeState", "AcquireTEMImage"]
 
+    # --- Gap-filling unit tests ---------------------------------------------------
+
+    def test_get_front_image_with_pixel_data(self, server) -> None:
+        """include_data=True should embed a base64 blob that decodes to the right size."""
+        import base64
+        from gms_mcp.server import FrontImageInput
+
+        raw = server.gms_get_front_image(FrontImageInput(include_data=True, include_tags=False))
+        data = self._parse(raw)
+        assert data["success"] is True
+        b64 = data["image"]["data_b64"]
+        assert isinstance(b64, str) and len(b64) > 0
+        blob = base64.b64decode(b64)
+        h, w = data["image"]["shape"]
+        assert len(blob) == h * w * 4  # float32 = 4 bytes/element
+
+    def test_apply_image_filter_gaussian_only(self, server) -> None:
+        """gaussian_sigma > 0 with median disabled should still succeed."""
+        from gms_mcp.server import ImageFilterInput
+
+        raw = server.gms_apply_image_filter(
+            ImageFilterInput(median_size=0, gaussian_sigma=2.0)
+        )
+        data = self._parse(raw)
+        assert data["success"] is True
+        assert data["image"]["shape"][0] > 0
+
+    def test_apply_image_filter_with_roi(self, server) -> None:
+        """ROI should crop the output to the specified region."""
+        from gms_mcp.server import AcquireTEMInput, ImageFilterInput
+
+        server.gms_acquire_tem_image(AcquireTEMInput())  # ensure a large front image
+        raw = server.gms_apply_image_filter(
+            ImageFilterInput(roi=[0, 0, 256, 256], median_size=3, gaussian_sigma=0.0)
+        )
+        data = self._parse(raw)
+        assert data["success"] is True
+        assert data["image"]["shape"] == [256, 256]
+
+    def test_compute_radial_profile_diffraction(self, server) -> None:
+        """mode='diffraction' should use raw pixel data instead of FFT magnitude."""
+        from gms_mcp.server import AcquireTEMInput, RadialProfileInput
+
+        server.gms_acquire_tem_image(AcquireTEMInput())
+        raw = server.gms_compute_radial_profile(
+            RadialProfileInput(mode="diffraction", binning=4)
+        )
+        data = self._parse(raw)
+        assert data["success"] is True
+        assert data["analysis"]["mode"] == "diffraction"
+        assert data["analysis"]["profile_length"] > 0
+        assert len(data["profile"]) == data["analysis"]["profile_length"]
+
+    def test_compute_radial_profile_mask_center(self, server) -> None:
+        """mask_center_lines should still return a valid profile."""
+        from gms_mcp.server import AcquireTEMInput, RadialProfileInput
+
+        server.gms_acquire_tem_image(AcquireTEMInput())
+        raw = server.gms_compute_radial_profile(
+            RadialProfileInput(mode="fft", mask_center_lines=True)
+        )
+        data = self._parse(raw)
+        assert data["success"] is True
+        assert data["analysis"]["profile_length"] > 0
+
+    def test_compute_max_fft_small_window(self, server) -> None:
+        """Non-default fft_size and spacing should be reflected in the output shape."""
+        from gms_mcp.server import AcquireTEMInput, MaxFFTInput
+
+        server.gms_acquire_tem_image(AcquireTEMInput())
+        raw = server.gms_compute_max_fft(MaxFFTInput(fft_size=32, spacing=64))
+        data = self._parse(raw)
+        assert data["success"] is True
+        assert data["image"]["shape"] == [32, 32]
+        assert data["analysis"]["n_windows"] >= 1
+
+    def test_set_beam_focus(self, server) -> None:
+        """Setting focus_um should appear in applied_settings and current_state."""
+        from gms_mcp.server import SetBeamInput
+
+        raw = server.gms_set_beam_parameters(SetBeamInput(focus_um=2.5))
+        data = self._parse(raw)
+        assert data["success"] is True
+        assert data["applied_settings"]["focus_um"] == pytest.approx(2.5)
+        assert data["current_state"]["focus_um"] == pytest.approx(2.5)
+
+    def test_set_beam_tilt(self, server) -> None:
+        """Beam tilt should be applied and echoed back."""
+        from gms_mcp.server import SetBeamInput
+
+        raw = server.gms_set_beam_parameters(SetBeamInput(tilt_x=0.003, tilt_y=-0.002))
+        data = self._parse(raw)
+        assert data["success"] is True
+        assert data["applied_settings"]["beam_tilt"] == pytest.approx([0.003, -0.002])
+
+    def test_set_beam_no_settings(self, server) -> None:
+        """Empty SetBeamInput should succeed with an empty applied_settings dict."""
+        from gms_mcp.server import SetBeamInput
+
+        raw = server.gms_set_beam_parameters(SetBeamInput())
+        data = self._parse(raw)
+        assert data["success"] is True
+        assert data["applied_settings"] == {}
+
+    def test_set_beam_flattened_focus(self, server) -> None:
+        """focus_um passed as a flat kwarg (LLM-style) should be accepted."""
+        raw = server.gms_set_beam_parameters(focus_um=1.0)
+        data = self._parse(raw)
+        assert data["success"] is True
+        assert data["applied_settings"]["focus_um"] == pytest.approx(1.0)
+
+    def test_configure_detectors_temperature(self, server) -> None:
+        """Setting target_temp_c should appear in applied and the status is readable."""
+        from gms_mcp.server import SetDetectorInput
+
+        raw = server.gms_configure_detectors(SetDetectorInput(target_temp_c=-20.0))
+        data = self._parse(raw)
+        assert data["success"] is True
+        assert data["applied"]["target_temp_c"] == pytest.approx(-20.0)
+        assert "actual_temp_c" in data["status"]
+
+    def test_configure_detectors_all_signals(self, server) -> None:
+        """Enable all three DigiScan channels and verify the status."""
+        from gms_mcp.server import SetDetectorInput
+
+        raw = server.gms_configure_detectors(
+            SetDetectorInput(haadf_enabled=True, bf_enabled=True, abf_enabled=True)
+        )
+        data = self._parse(raw)
+        assert data["success"] is True
+        assert data["status"]["haadf_enabled"] is True
+        assert data["status"]["bf_enabled"] is True
+        assert data["status"]["abf_enabled"] is True
+
+    def test_acquire_stem_custom_size(self, server) -> None:
+        """Non-square STEM scan with custom dwell time should succeed."""
+        from gms_mcp.server import AcquireSTEMInput
+
+        raw = server.gms_acquire_stem(
+            AcquireSTEMInput(width=128, height=64, dwell_us=20.0)
+        )
+        data = self._parse(raw)
+        assert data["success"] is True
+        assert data["scan_parameters"]["width"] == 128
+        assert data["scan_parameters"]["height"] == 64
+        assert data["scan_parameters"]["dwell_us"] == pytest.approx(20.0)
+
+    def test_acquire_diffraction_with_binning(self, server) -> None:
+        """Binned diffraction acquisition should succeed and return a pattern."""
+        from gms_mcp.server import AcquireDiffractionInput
+
+        raw = server.gms_acquire_diffraction(
+            AcquireDiffractionInput(exposure_s=0.1, binning=2)
+        )
+        data = self._parse(raw)
+        assert data["success"] is True
+        assert "pattern" in data
+        # binned image should still have a non-zero central region
+        assert data["pattern"]["direct_beam_centre"][0] > 0
+
+    def test_acquire_eels_full_params(self, server) -> None:
+        """All AcquireEELSInput fields should be respected."""
+        from gms_mcp.server import AcquireEELSInput
+
+        raw = server.gms_acquire_eels(AcquireEELSInput(
+            exposure_s=0.5,
+            energy_offset_eV=200.0,
+            slit_width_eV=3.0,
+            dispersion_idx=2,
+            full_vertical_binning=False,
+        ))
+        data = self._parse(raw)
+        assert data["success"] is True
+        assert data["spectrum"]["energy_range_eV"][0] == pytest.approx(200.0)
+        assert data["spectrum"]["n_channels"] > 0
+
+    def test_acquire_4d_stem_convergence_metadata(self, server) -> None:
+        """convergence_mrad should be stored in the dataset metadata."""
+        from gms_mcp.server import Acquire4DSTEMInput
+
+        raw = server.gms_acquire_4d_stem(
+            Acquire4DSTEMInput(scan_x=8, scan_y=8, dwell_us=500.0, convergence_mrad=12.5)
+        )
+        data = self._parse(raw)
+        assert data["success"] is True
+        assert data["dataset"]["convergence_mrad"] == pytest.approx(12.5)
+
+    def test_4dstem_analysis_dpc(self, server) -> None:
+        """Differential phase contrast analysis should return a 2-D result map."""
+        from gms_mcp.server import Acquire4DSTEMInput
+
+        server.gms_acquire_4d_stem(Acquire4DSTEMInput(scan_x=8, scan_y=8, dwell_us=500.0))
+        raw = server.gms_run_4dstem_analysis(
+            inner_angle_mrad=0.0,
+            outer_angle_mrad=50.0,
+            analysis_type="dpc",
+        )
+        data = self._parse(raw)
+        assert data["success"] is True
+        assert data["analysis"]["type"] == "dpc"
+        assert data["analysis"]["result_shape"] == [8, 8]
+
+    def test_4dstem_analysis_virtual_bf(self, server) -> None:
+        """Virtual BF should succeed analogously to virtual HAADF."""
+        from gms_mcp.server import Acquire4DSTEMInput
+
+        server.gms_acquire_4d_stem(Acquire4DSTEMInput(scan_x=8, scan_y=8, dwell_us=500.0))
+        raw = server.gms_run_4dstem_analysis(
+            inner_angle_mrad=0.0,
+            outer_angle_mrad=20.0,
+            analysis_type="virtual_bf",
+        )
+        data = self._parse(raw)
+        assert data["success"] is True
+        assert data["analysis"]["type"] == "virtual_bf"
+
+    def test_live_job_unknown_id(self, server) -> None:
+        """Querying a non-existent job ID should return success=False."""
+        from gms_mcp.server import LiveProcessingJobQuery
+
+        raw = server.gms_get_live_processing_job_status(
+            LiveProcessingJobQuery(job_id="nonexistent-job-id-xyz")
+        )
+        data = self._parse(raw)
+        assert data["success"] is False
+
+    def test_live_job_stop_unknown_id(self, server) -> None:
+        """Stopping a non-existent job ID should return success=False."""
+        from gms_mcp.server import LiveProcessingJobQuery
+
+        raw = server.gms_stop_live_processing_job(
+            LiveProcessingJobQuery(job_id="nonexistent-job-xyz")
+        )
+        data = self._parse(raw)
+        assert data["success"] is False
+
+    def test_live_job_result_unknown_id(self, server) -> None:
+        """Fetching results for a non-existent job should return success=False."""
+        from gms_mcp.server import LiveProcessingJobQuery
+
+        raw = server.gms_get_live_processing_job_result(
+            LiveProcessingJobQuery(job_id="nonexistent-job-xyz")
+        )
+        data = self._parse(raw)
+        assert data["success"] is False
+
+    def test_tilt_series_single_step(self, server) -> None:
+        """A single-step tilt series (start=end allowed via step) still runs."""
+        from gms_mcp.server import TiltSeriesInput
+
+        raw = server.gms_acquire_tilt_series(
+            TiltSeriesInput(start_deg=-5.0, end_deg=5.0, step_deg=10.0,
+                            exposure_s=0.1, binning=8)
+        )
+        data = self._parse(raw)
+        assert data["success"] is True
+        assert data["tilt_series"]["n_frames"] >= 1
+
+    def test_tilt_series_invalid_step(self) -> None:
+        """step_deg below minimum should raise a pydantic ValidationError."""
+        from gms_mcp.server import TiltSeriesInput
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            TiltSeriesInput(start_deg=-10.0, end_deg=10.0, step_deg=0.1)
+
+    def test_get_microscope_state_camera_section(self, server) -> None:
+        """The 'camera' key should be present with name and inserted status."""
+        raw = server.gms_get_microscope_state()
+        data = self._parse(raw)
+        assert data["success"] is True
+        assert "camera" in data
+        cam = data["camera"]
+        assert "name" in cam
+        assert "inserted" in cam
+        assert "n_signals" in cam
+
+    def test_live_radial_profile_diffraction_mode(self, server) -> None:
+        """A live radial-profile job in diffraction mode should run and stop."""
+        from gms_mcp.server import AcquireTEMInput, LiveProcessingJobQuery, StartLiveProcessingJobInput
+
+        server.gms_acquire_tem_image(AcquireTEMInput())
+        start = self._parse(
+            server.gms_start_live_processing_job(
+                StartLiveProcessingJobInput(
+                    job_type="radial_profile",
+                    poll_interval_s=0.05,
+                    history_length=16,
+                    profile_mode="diffraction",
+                )
+            )
+        )
+        assert start["success"] is True
+        job_id = start["job"]["job_id"]
+        try:
+            status = self._wait_for_live_job(server, job_id, min_iterations=1)
+            assert status["job"]["status"] in {"running", "stopped"}
+            result = self._parse(
+                server.gms_get_live_processing_job_result(
+                    LiveProcessingJobQuery(job_id=job_id)
+                )
+            )
+            assert result["success"] is True
+        finally:
+            self._parse(server.gms_stop_live_processing_job(
+                LiveProcessingJobQuery(job_id=job_id)
+            ))
+
+    # -------------------------------------------------------------------------
+
     def test_live_maximum_spot_mapping_bridge_delegation(self, server, monkeypatch) -> None:
         from gms_mcp.server import LiveProcessingJobQuery, StartLiveProcessingJobInput
 
@@ -1233,6 +1543,179 @@ class TestOllamaIntegration:
         assert result["answer"]
         called = [tc["tool"] for tc in result["tool_calls"]]
         assert "gms_set_stage_position" in called
+
+    @_OLLAMA_SKIP
+    def test_front_image_and_filter_workflow(self) -> None:
+        """Agent should fetch the front image then apply a Gaussian filter."""
+        from gms_mcp.client import run_agent
+
+        result = asyncio.run(run_agent(
+            query=(
+                "Get the current front image, apply a Gaussian filter with sigma=1.5 "
+                "to it, and report the resulting image shape and mean intensity."
+            ),
+            model=OLLAMA_MODEL,
+            base_url=OLLAMA_URL,
+        ))
+        assert result["answer"]
+        called = [tc["tool"] for tc in result["tool_calls"]]
+        assert "gms_apply_image_filter" in called
+
+    @_OLLAMA_SKIP
+    def test_diffraction_workflow(self) -> None:
+        """Agent should acquire a diffraction pattern and describe it."""
+        from gms_mcp.client import run_agent
+
+        result = asyncio.run(run_agent(
+            query=(
+                "Acquire a diffraction pattern with a 200 mm camera length and "
+                "0.3 s exposure, then report the direct-beam centre coordinates "
+                "and the number of diffraction rings detected."
+            ),
+            model=OLLAMA_MODEL,
+            base_url=OLLAMA_URL,
+        ))
+        assert result["answer"]
+        called = [tc["tool"] for tc in result["tool_calls"]]
+        assert "gms_acquire_diffraction" in called
+
+    @_OLLAMA_SKIP
+    def test_radial_profile_workflow(self) -> None:
+        """Agent should acquire a TEM image and compute its FFT radial profile."""
+        from gms_mcp.client import run_agent
+
+        result = asyncio.run(run_agent(
+            query=(
+                "Acquire a TEM image and compute its radial FFT profile. "
+                "Report the profile length and dominant spatial frequency."
+            ),
+            model=OLLAMA_MODEL,
+            base_url=OLLAMA_URL,
+        ))
+        assert result["answer"]
+        called = [tc["tool"] for tc in result["tool_calls"]]
+        assert "gms_compute_radial_profile" in called
+
+    @_OLLAMA_SKIP
+    def test_beam_focus_and_acquire(self) -> None:
+        """Agent should set focus and spot size, then acquire a TEM image."""
+        from gms_mcp.client import run_agent
+
+        result = asyncio.run(run_agent(
+            query=(
+                "Set the objective lens focus to 2.0 µm and spot size to 3, "
+                "then acquire a TEM image and report the image statistics."
+            ),
+            model=OLLAMA_MODEL,
+            base_url=OLLAMA_URL,
+        ))
+        assert result["answer"]
+        called = [tc["tool"] for tc in result["tool_calls"]]
+        assert "gms_set_beam_parameters" in called
+        assert "gms_acquire_tem_image" in called
+
+    @_OLLAMA_SKIP
+    def test_4dstem_workflow(self) -> None:
+        """Agent should acquire a 4D-STEM dataset and run virtual HAADF analysis."""
+        from gms_mcp.client import run_agent
+
+        result = asyncio.run(run_agent(
+            query=(
+                "Acquire a small 16×16 4D-STEM dataset with 1 ms dwell time, "
+                "then compute a virtual HAADF image with inner angle 20 mrad "
+                "and outer angle 60 mrad. Report the scan shape and mean intensity."
+            ),
+            model=OLLAMA_MODEL,
+            base_url=OLLAMA_URL,
+        ))
+        assert result["answer"]
+        called = [tc["tool"] for tc in result["tool_calls"]]
+        assert "gms_acquire_4d_stem" in called
+        assert "gms_run_4dstem_analysis" in called
+
+    @_OLLAMA_SKIP
+    def test_tilt_series_workflow(self) -> None:
+        """Agent should acquire a tilt series and summarise per-frame statistics."""
+        from gms_mcp.client import run_agent
+
+        result = asyncio.run(run_agent(
+            query=(
+                "Acquire a tilt series from -15° to +15° in 5° steps with 0.2 s "
+                "exposure. Report the mean intensity at each tilt angle."
+            ),
+            model=OLLAMA_MODEL,
+            base_url=OLLAMA_URL,
+        ))
+        assert result["answer"]
+        called = [tc["tool"] for tc in result["tool_calls"]]
+        assert "gms_acquire_tilt_series" in called
+
+    @_OLLAMA_SKIP
+    def test_configure_detectors_and_acquire_stem(self) -> None:
+        """Agent should configure detectors then run a STEM acquisition."""
+        from gms_mcp.client import run_agent
+
+        result = asyncio.run(run_agent(
+            query=(
+                "Enable the HAADF detector and disable the BF and ABF detectors, "
+                "then acquire a 256×256 STEM image with 10 µs dwell time "
+                "and report the image statistics."
+            ),
+            model=OLLAMA_MODEL,
+            base_url=OLLAMA_URL,
+        ))
+        assert result["answer"]
+        called = [tc["tool"] for tc in result["tool_calls"]]
+        assert "gms_configure_detectors" in called
+        assert "gms_acquire_stem" in called
+
+    @_OLLAMA_SKIP
+    def test_live_processing_workflow(self) -> None:
+        """Agent should start a live FFT map job, check status, and stop it."""
+        from gms_mcp.client import run_agent
+
+        result = asyncio.run(run_agent(
+            query=(
+                "Start a live FFT map processing job with a 64-pixel FFT window, "
+                "check its status, then stop it. Report the job ID and final status."
+            ),
+            model=OLLAMA_MODEL,
+            base_url=OLLAMA_URL,
+        ))
+        assert result["answer"]
+        called = [tc["tool"] for tc in result["tool_calls"]]
+        assert "gms_start_live_processing_job" in called
+        assert any(t in called for t in (
+            "gms_get_live_processing_job_status",
+            "gms_stop_live_processing_job",
+        ))
+
+    @_OLLAMA_SKIP
+    def test_full_characterisation_workflow(self) -> None:
+        """
+        Multi-step workflow:
+        1. Get microscope state
+        2. Set beam parameters (spot size + focus)
+        3. Acquire TEM image
+        4. Compute radial FFT profile
+        5. Report findings
+        """
+        from gms_mcp.client import run_agent
+
+        result = asyncio.run(run_agent(
+            query=(
+                "Perform a full characterisation: first read the microscope state, "
+                "then set spot size to 4 and focus to 1.5 µm, acquire a TEM image "
+                "with 0.5 s exposure, compute its radial FFT profile, and give me "
+                "a summary of the acquisition parameters and the dominant frequency."
+            ),
+            model=OLLAMA_MODEL,
+            base_url=OLLAMA_URL,
+        ))
+        assert result["answer"]
+        called = [tc["tool"] for tc in result["tool_calls"]]
+        assert len(set(called)) >= 3
+        assert "gms_acquire_tem_image" in called
 
     @_OLLAMA_SKIP
     def test_multi_step_workflow(self) -> None:
