@@ -1288,15 +1288,24 @@ def gms_get_microscope_state() -> str:
     annotations={"readOnlyHint": True, "destructiveHint": False,
                  "idempotentHint": True, "openWorldHint": False},
 )
-def gms_get_front_image(params: FrontImageInput = FrontImageInput()) -> str:
+def gms_get_front_image(
+    params: Optional[FrontImageInput] = None,
+    include_data: bool = False,
+    include_tags: bool = True,
+) -> str:
     """
     Return metadata for the front-most image in the GMS workspace.
 
     Parameters:
         params.include_data (bool): Include base64-encoded pixel data.
         params.include_tags (bool): Include serialisable image tags when available.
+
+    The same fields can also be passed directly as top-level kwargs
+    (e.g. `include_data=True`) for compatibility with some LLM tool clients.
     """
     try:
+        if params is None:
+            params = FrontImageInput(include_data=include_data, include_tags=include_tags)
         if _bridge_mode_enabled():
             result = _run_bridge_tool("GetFrontImage", {
                 "include_data": params.include_data,
@@ -1329,11 +1338,28 @@ def gms_get_front_image(params: FrontImageInput = FrontImageInput()) -> str:
     annotations={"readOnlyHint": False, "destructiveHint": False,
                  "idempotentHint": True, "openWorldHint": False},
 )
-def gms_apply_image_filter(params: ImageFilterInput) -> str:
+def gms_apply_image_filter(
+    params: Optional[ImageFilterInput] = None,
+    median_size: int = 0,
+    gaussian_sigma: float = 0.0,
+) -> str:
     """
     Apply median and/or Gaussian filtering to the front-most image or ROI.
+
+    Parameters:
+        params.median_size    (int)   : Median-filter kernel size (0 = disabled).
+        params.gaussian_sigma (float) : Gaussian blur sigma (0 = disabled).
+        params.roi            (list)  : Optional [top, left, bottom, right] ROI.
+
+    The same fields can also be passed directly as top-level kwargs
+    (e.g. `gaussian_sigma=1.5`) for compatibility with some LLM tool clients.
     """
     try:
+        if params is None:
+            params = ImageFilterInput(
+                median_size=median_size,
+                gaussian_sigma=gaussian_sigma,
+            )
         if _bridge_mode_enabled():
             result = _run_bridge_tool("ApplyImageFilter", params.model_dump())
             return json.dumps(result, indent=2)
@@ -1378,11 +1404,24 @@ def gms_apply_image_filter(params: ImageFilterInput) -> str:
     annotations={"readOnlyHint": True, "destructiveHint": False,
                  "idempotentHint": True, "openWorldHint": False},
 )
-def gms_compute_radial_profile(params: RadialProfileInput) -> str:
+def gms_compute_radial_profile(
+    params: Optional[RadialProfileInput] = None,
+    mode: str = "fft",
+    binning: int = 1,
+) -> str:
     """
     Compute a 1D radial profile from a diffraction pattern or from the FFT of a TEM image.
+
+    Parameters:
+        params.mode    (str) : 'fft' or 'diffraction'.
+        params.binning (int) : Integer binning factor before profiling.
+
+    The same fields can also be passed directly as top-level kwargs
+    (e.g. `mode='fft'`) for compatibility with some LLM tool clients.
     """
     try:
+        if params is None:
+            params = RadialProfileInput(mode=mode, binning=binning)
         if _bridge_mode_enabled():
             result = _run_bridge_tool("ComputeRadialProfile", params.model_dump())
             return json.dumps(result, indent=2)
@@ -1621,11 +1660,46 @@ def gms_run_4dstem_maximum_spot_mapping(params: MaxSpotMapInput) -> str:
     annotations={"readOnlyHint": False, "destructiveHint": False,
                  "idempotentHint": False, "openWorldHint": False},
 )
-def gms_start_live_processing_job(params: StartLiveProcessingJobInput) -> str:
+def gms_start_live_processing_job(
+    params: Optional[StartLiveProcessingJobInput] = None,
+    job_type: str = "",
+    poll_interval_s: float = 0.5,
+    fft_size: int = 256,
+    spacing: int = 256,
+    median_size: int = 0,
+    gaussian_sigma: float = 0.0,
+    history_length: int = 200,
+    profile_mode: str = "fft",
+    avg_period_1: int = 5,
+    avg_period_2: int = 10,
+    mask_center_radius_px: float = 5.0,
+    map_var: str = "theta",
+) -> str:
     """
     Start a persistent live-processing job for radial profiles, live difference, live FFT maps, or live filtered views.
+
+    Parameters:
+        params.job_type (str) : 'radial_profile', 'difference', 'fft_map', 'filtered_view', or 'maximum_spot_mapping'.
+
+    The same fields can also be passed directly as top-level kwargs
+    (e.g. `job_type='fft_map'`) for compatibility with some LLM tool clients.
     """
     try:
+        if params is None:
+            params = StartLiveProcessingJobInput(
+                job_type=job_type,
+                poll_interval_s=poll_interval_s,
+                fft_size=fft_size,
+                spacing=spacing,
+                median_size=median_size,
+                gaussian_sigma=gaussian_sigma,
+                history_length=history_length,
+                profile_mode=profile_mode,
+                avg_period_1=avg_period_1,
+                avg_period_2=avg_period_2,
+                mask_center_radius_px=mask_center_radius_px,
+                map_var=map_var,
+            )
         if params.job_type not in {"radial_profile", "difference", "fft_map", "filtered_view", "maximum_spot_mapping"}:
             return _build_error(
                 "job_type must be 'radial_profile', 'difference', 'fft_map', 'filtered_view', or 'maximum_spot_mapping'."
@@ -1708,11 +1782,22 @@ def gms_start_live_processing_job(params: StartLiveProcessingJobInput) -> str:
     annotations={"readOnlyHint": True, "destructiveHint": False,
                  "idempotentHint": True, "openWorldHint": False},
 )
-def gms_get_live_processing_job_status(params: LiveProcessingJobQuery) -> str:
+def gms_get_live_processing_job_status(
+    params: Optional[LiveProcessingJobQuery] = None,
+    job_id: str = "",
+) -> str:
     """
     Get the current status of a live-processing job.
+
+    Parameters:
+        params.job_id (str) : Live-processing job identifier.
+
+    The same field can also be passed directly as a top-level kwarg
+    (e.g. `job_id='abc123'`) for compatibility with some LLM tool clients.
     """
     try:
+        if params is None:
+            params = LiveProcessingJobQuery(job_id=job_id)
         try:
             job = _get_live_job(params.job_id)
             return json.dumps({"success": True, "job": _job_status_payload(job)}, indent=2)
@@ -1732,11 +1817,22 @@ def gms_get_live_processing_job_status(params: LiveProcessingJobQuery) -> str:
     annotations={"readOnlyHint": True, "destructiveHint": False,
                  "idempotentHint": True, "openWorldHint": False},
 )
-def gms_get_live_processing_job_result(params: LiveProcessingJobQuery) -> str:
+def gms_get_live_processing_job_result(
+    params: Optional[LiveProcessingJobQuery] = None,
+    job_id: str = "",
+) -> str:
     """
     Get the latest derived result produced by a live-processing job.
+
+    Parameters:
+        params.job_id (str) : Live-processing job identifier.
+
+    The same field can also be passed directly as a top-level kwarg
+    (e.g. `job_id='abc123'`) for compatibility with some LLM tool clients.
     """
     try:
+        if params is None:
+            params = LiveProcessingJobQuery(job_id=job_id)
         try:
             job = _get_live_job(params.job_id)
         except KeyError:
@@ -1777,11 +1873,22 @@ def gms_get_live_processing_job_result(params: LiveProcessingJobQuery) -> str:
     annotations={"readOnlyHint": False, "destructiveHint": False,
                  "idempotentHint": True, "openWorldHint": False},
 )
-def gms_stop_live_processing_job(params: LiveProcessingJobQuery) -> str:
+def gms_stop_live_processing_job(
+    params: Optional[LiveProcessingJobQuery] = None,
+    job_id: str = "",
+) -> str:
     """
     Stop a live-processing job and return its final status.
+
+    Parameters:
+        params.job_id (str) : Live-processing job identifier.
+
+    The same field can also be passed directly as a top-level kwarg
+    (e.g. `job_id='abc123'`) for compatibility with some LLM tool clients.
     """
     try:
+        if params is None:
+            params = LiveProcessingJobQuery(job_id=job_id)
         try:
             job = _get_live_job(params.job_id)
         except KeyError:
@@ -1813,22 +1920,33 @@ def gms_stop_live_processing_job(params: LiveProcessingJobQuery) -> str:
     annotations={"readOnlyHint": False, "destructiveHint": False,
                  "idempotentHint": False, "openWorldHint": False},
 )
-def gms_acquire_tem_image(params: AcquireTEMInput) -> str:
+def gms_acquire_tem_image(
+    params: Optional[AcquireTEMInput] = None,
+    exposure_s: float = 1.0,
+    binning: int = 1,
+    processing: int = 3,
+) -> str:
     """
     Acquire a single TEM or HRTEM image from the currently inserted camera.
 
     Parameters:
-        params.exposure_s  (float)   : Camera exposure in seconds (0.001–60).
-        params.binning     (int)     : Binning factor 1, 2, 4, or 8.
-        params.processing  (int)     : 1=raw, 2=dark only, 3=dark+gain (default).
-        params.roi         (list)    : Optional [top, left, bottom, right] ROI.
+        params.exposure_s  (float) : Camera exposure in seconds (0.001–60).
+        params.binning     (int)   : Binning factor 1, 2, 4, or 8.
+        params.processing  (int)   : 1=raw, 2=dark only, 3=dark+gain (default).
+        params.roi         (list)  : Optional [top, left, bottom, right] ROI.
 
-    Returns JSON with:
-        - Image shape, dtype, min/max/mean/std statistics
-        - Pixel calibration (nm/pixel)
-        - Acquisition metadata (exposure, HT, magnification)
+    The same fields can also be passed directly as top-level kwargs
+    (e.g. `exposure_s=0.5`) for compatibility with some LLM tool clients.
+
+    Returns JSON with image shape, statistics, calibration, and metadata.
     """
     try:
+        if params is None:
+            params = AcquireTEMInput(
+                exposure_s=exposure_s,
+                binning=binning,
+                processing=processing,
+            )
         if _bridge_mode_enabled():
             result = _run_bridge_tool("AcquireTEMImage", params.model_dump())
             return json.dumps(result, indent=2)
@@ -1948,7 +2066,14 @@ def gms_acquire_stem(
     annotations={"readOnlyHint": False, "destructiveHint": False,
                  "idempotentHint": False, "openWorldHint": False},
 )
-def gms_acquire_4d_stem(params: Acquire4DSTEMInput) -> str:
+def gms_acquire_4d_stem(
+    params: Optional[Acquire4DSTEMInput] = None,
+    scan_x: int = 64,
+    scan_y: int = 64,
+    dwell_us: float = 1000.0,
+    camera_length_mm: Optional[float] = None,
+    convergence_mrad: Optional[float] = None,
+) -> str:
     """
     Acquire a 4D-STEM / NBED dataset.
 
@@ -1957,17 +2082,25 @@ def gms_acquire_4d_stem(params: Acquire4DSTEMInput) -> str:
     producing a 4D dataset of shape (scan_y, scan_x, det_y, det_x).
 
     Parameters:
-        params.scan_x          (int)   : Scan positions in X (8–512).
-        params.scan_y          (int)   : Scan positions in Y.
-        params.dwell_us        (float) : Per-pattern acquisition time in µs.
-        params.camera_length_mm(float) : Camera length in mm (optional).
-        params.convergence_mrad(float) : Convergence semi-angle (logged only).
+        params.scan_x           (int)   : Scan positions in X (8–512).
+        params.scan_y           (int)   : Scan positions in Y.
+        params.dwell_us         (float) : Per-pattern acquisition time in µs.
+        params.camera_length_mm (float) : Camera length in mm (optional).
+        params.convergence_mrad (float) : Convergence semi-angle (logged only).
+
+    The same fields can also be passed directly as top-level kwargs
+    (e.g. `scan_x=32`) for compatibility with some LLM tool clients.
 
     Returns JSON with dataset shape, estimated file size, metadata.
-    Note: actual pixel data omitted from response due to size; retrieve via
-          the GMS workspace or save to disk.
     """
     try:
+        if params is None:
+            kw: dict[str, object] = {"scan_x": scan_x, "scan_y": scan_y, "dwell_us": dwell_us}
+            if camera_length_mm is not None:
+                kw["camera_length_mm"] = camera_length_mm
+            if convergence_mrad is not None:
+                kw["convergence_mrad"] = convergence_mrad
+            params = Acquire4DSTEMInput(**kw)
         if _bridge_mode_enabled():
             result = _run_bridge_tool("Acquire4DSTEM", params.model_dump())
             return json.dumps(result, indent=2)
@@ -2139,7 +2272,12 @@ def gms_acquire_eels(
     annotations={"readOnlyHint": False, "destructiveHint": False,
                  "idempotentHint": False, "openWorldHint": False},
 )
-def gms_acquire_diffraction(params: AcquireDiffractionInput) -> str:
+def gms_acquire_diffraction(
+    params: Optional[AcquireDiffractionInput] = None,
+    exposure_s: float = 0.5,
+    binning: int = 1,
+    camera_length_mm: Optional[float] = None,
+) -> str:
     """
     Acquire a selected-area or nano-beam electron diffraction pattern.
 
@@ -2151,10 +2289,18 @@ def gms_acquire_diffraction(params: AcquireDiffractionInput) -> str:
         params.camera_length_mm (float) : Camera length in mm (optional).
         params.binning          (int)   : Camera binning.
 
+    The same fields can also be passed directly as top-level kwargs
+    (e.g. `exposure_s=0.3`) for compatibility with some LLM tool clients.
+
     Returns JSON with image statistics, d-spacing scale (1/Å per pixel),
     direct-beam centre estimate, and brightest ring radii.
     """
     try:
+        if params is None:
+            kw: dict[str, object] = {"exposure_s": exposure_s, "binning": binning}
+            if camera_length_mm is not None:
+                kw["camera_length_mm"] = camera_length_mm
+            params = AcquireDiffractionInput(**kw)
         if _bridge_mode_enabled():
             result = _run_bridge_tool("AcquireDiffraction", params.model_dump())
             return json.dumps(result, indent=2)
@@ -2456,20 +2602,43 @@ def gms_set_beam_parameters(
     annotations={"readOnlyHint": False, "destructiveHint": False,
                  "idempotentHint": True, "openWorldHint": False},
 )
-def gms_configure_detectors(params: SetDetectorInput) -> str:
+def gms_configure_detectors(
+    params: Optional[SetDetectorInput] = None,
+    insert_camera: Optional[bool] = None,
+    haadf_enabled: Optional[bool] = None,
+    bf_enabled: Optional[bool] = None,
+    abf_enabled: Optional[bool] = None,
+    target_temp_c: Optional[float] = None,
+) -> str:
     """
     Configure camera and STEM detector settings.
 
     Parameters:
-        params.insert_camera   (bool)  : Insert (True) or retract (False) camera.
-        params.target_temp_c   (float) : Target CCD cooling temperature in °C.
-        params.haadf_enabled   (bool)  : Enable/disable HAADF channel (DS signal 0).
-        params.bf_enabled      (bool)  : Enable/disable BF channel (DS signal 1).
-        params.abf_enabled     (bool)  : Enable/disable ABF channel (DS signal 2).
+        params.insert_camera (bool)  : Insert (True) or retract (False) camera.
+        params.target_temp_c (float) : Target CCD cooling temperature in °C.
+        params.haadf_enabled (bool)  : Enable/disable HAADF channel (DS signal 0).
+        params.bf_enabled    (bool)  : Enable/disable BF channel (DS signal 1).
+        params.abf_enabled   (bool)  : Enable/disable ABF channel (DS signal 2).
+
+    The same fields can also be passed directly as top-level kwargs
+    (e.g. `haadf_enabled=True`) for compatibility with some LLM tool clients.
 
     Returns JSON with detector status after applying configuration.
     """
     try:
+        if params is None:
+            kw: dict[str, object] = {}
+            if insert_camera is not None:
+                kw["insert_camera"] = insert_camera
+            if haadf_enabled is not None:
+                kw["haadf_enabled"] = haadf_enabled
+            if bf_enabled is not None:
+                kw["bf_enabled"] = bf_enabled
+            if abf_enabled is not None:
+                kw["abf_enabled"] = abf_enabled
+            if target_temp_c is not None:
+                kw["target_temp_c"] = target_temp_c
+            params = SetDetectorInput(**kw)
         if _bridge_mode_enabled():
             result = _run_bridge_tool("ConfigureDetectors", params.model_dump(exclude_none=True))
             return json.dumps(result, indent=2)
@@ -2520,7 +2689,14 @@ def gms_configure_detectors(params: SetDetectorInput) -> str:
     annotations={"readOnlyHint": False, "destructiveHint": False,
                  "idempotentHint": False, "openWorldHint": False},
 )
-def gms_acquire_tilt_series(params: TiltSeriesInput) -> str:
+def gms_acquire_tilt_series(
+    params: Optional[TiltSeriesInput] = None,
+    start_deg: float = -60.0,
+    end_deg: float = 60.0,
+    step_deg: float = 2.0,
+    exposure_s: float = 1.0,
+    binning: int = 2,
+) -> str:
     """
     Acquire an automated tomographic tilt series.
 
@@ -2535,10 +2711,21 @@ def gms_acquire_tilt_series(params: TiltSeriesInput) -> str:
         params.binning    (int)   : Camera binning.
         params.save_dir   (str)   : Optional directory for DM4 output.
 
+    The same fields can also be passed directly as top-level kwargs
+    (e.g. `start_deg=-15.0`) for compatibility with some LLM tool clients.
+
     Returns JSON summary including per-tilt image statistics and total
     acquisition time.
     """
     try:
+        if params is None:
+            params = TiltSeriesInput(
+                start_deg=start_deg,
+                end_deg=end_deg,
+                step_deg=step_deg,
+                exposure_s=exposure_s,
+                binning=binning,
+            )
         if _bridge_mode_enabled():
             result = _run_bridge_tool("AcquireTiltSeries", params.model_dump())
             return json.dumps(result, indent=2)
