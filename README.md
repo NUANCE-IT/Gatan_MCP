@@ -7,7 +7,9 @@
 [![Code style: ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 [![Northwestern NUANCE](https://img.shields.io/badge/NUANCE-Northwestern-4E2A84.svg)](https://www.nuance.northwestern.edu)
 
-> **A vendor-agnostic, privacy-preserving Model Context Protocol server for multimodal electron microscopy control via local large language models.**
+> **Local LLM-Orchestrated Multimodal Electron Microscopy via a Model Context Protocol Interface**
+>
+> A vendor-agnostic, privacy-preserving Model Context Protocol server for multimodal electron microscopy control via local large language models.
 
 GMS-MCP connects **Gatan Microscopy Suite (GMS) 3.60** to any MCP-compatible LLM — running entirely on your institution's hardware, with zero cloud dependencies.
 
