@@ -313,6 +313,13 @@ NUANCE_GMS_MCP/
 
 * Historical latencies for qwen, llama, and mistral were measured on an RTX 4090. The `gemma4` row was measured locally on Apr. 3, 2026 using the 15-test Ollama integration suite (`pytest -m ollama`) on Apple Silicon. It passed 14/15 tests overall; the only miss was the front-image filtering workflow, where the model inspected the image but did not call `gms_apply_image_filter`.
 
+Same-hardware Apple Silicon comparison (`pytest -m ollama --durations=15`, Apr. 3, 2026):
+
+| Model | Tool-calling pass rate | Median test latency |
+|---|---|---|
+| qwen2.5:7b | 15/15 (100%) | 29.34 s |
+| gemma4 | 14/15 (93%) | 43.66 s |
+
 ---
 
 ## Citation
