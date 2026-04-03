@@ -95,6 +95,7 @@ ollama pull qwen2.5:7b
 # Alternatives
 ollama pull qwen2.5:14b    # higher accuracy, slower
 ollama pull llama3.1:8b    # reliable, widely tested
+ollama pull gemma4         # strong general performance; benchmarked locally
 ```
 
 ### 3. Run in simulation mode (no microscope needed)
@@ -184,8 +185,8 @@ All tools enforce **physical parameter bounds** via Pydantic v2 before any hardw
 
 Recent updates align live-mode calls with the DigitalMicrograph PythonReference API. Some controls are not exposed directly in that API and therefore require the ZeroMQ bridge (`GMS_MCP_ZMQ`) to a DM-script/plugin context.
 
-- Live EELS GIF/IFC control is bridge-recommended.
-- Some detector controls (for example global DS signal toggles and CCD target temperature) are bridge-recommended.
+- Live EELS GIF control is bridge-recommended.
+- Some detector controls (for example global DS signal toggles and target temperature) are bridge-recommended.
 - Setting camera length programmatically is bridge-recommended for live DM sessions.
 
 When these operations are unavailable in direct Python mode, tool responses return structured `UNSUPPORTED` guidance rather than failing silently.
@@ -301,13 +302,16 @@ NUANCE_GMS_MCP/
 
 ## Supported Ollama Models
 
-| Model | Tool-calling | Multi-step | Latency (RTX 4090) |
+| Model | Tool-calling | Multi-step | Observed latency* |
 |---|---|---|---|
 | **qwen2.5:7b** ⭐ | 97% | 90% | 4.2 s |
 | qwen2.5:14b | 99% | 95% | 8.7 s |
 | llama3.1:8b | 94% | 82% | 5.1 s |
 | llama3.2:3b | 82% | 58% | 2.8 s |
 | mistral-nemo | 88% | 70% | 6.3 s |
+| gemma4 | 93% | 88% | 43.7 s |
+
+* Historical latencies for qwen, llama, and mistral were measured on an RTX 4090. The `gemma4` row was measured locally on Apr. 3, 2026 using the 15-test Ollama integration suite (`pytest -m ollama`) on Apple Silicon. It passed 14/15 tests overall; the only miss was the front-image filtering workflow, where the model inspected the image but did not call `gms_apply_image_filter`.
 
 ---
 
